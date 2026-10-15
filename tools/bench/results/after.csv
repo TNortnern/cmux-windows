@@ -1,0 +1,4 @@
+"Label","Scenario","AppPrivateMB","AppWorkingSetMB","DaemonPrivateMB","TotalCmuxPrivMB","AppHandles","AppThreads","ShellProcesses"
+"after","1-idle (1 tab, 1 pane)","251.4","311.6","0","251.4","672","121","1"
+"after","2-loaded (4 tabs x 3 panes, 20k-line floods)","315.3","391.3","0","315.3","867","139","12"
+"after","3-after 60 tab switches","354.7","431","0","354.7","866","140","12"
