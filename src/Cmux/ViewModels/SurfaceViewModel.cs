@@ -1,5 +1,5 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Cmux.Core.Config;
@@ -10,18 +10,27 @@ using Cmux.Core.Terminal;
 
 namespace Cmux.ViewModels;
 
+/// <summary>
+/// One tab. Owns the split layout and one terminal session per pane. Terminal sessions are
+/// started lazily (<see cref="EnsureSessionsStarted"/>) so restored tabs cost nothing until shown.
+/// </summary>
 public partial class SurfaceViewModel : ObservableObject, IDisposable
 {
     public Surface Surface { get; }
     private readonly string _workspaceId;
     private readonly NotificationService _notificationService;
-    private readonly Dictionary<string, TerminalSession> _sessions = [];
+    private readonly string? _initialWorkingDirectory;
+    private readonly ConcurrentDictionary<string, TerminalSession> _sessions = new();
     private readonly Dictionary<string, List<string>> _paneCommandHistory = [];
-    private readonly Dictionary<string, string?> _paneShells = [];
-    private readonly HashSet<string> _daemonPanes = [];
-    private readonly HashSet<string> _daemonOutputLogged = [];
-    private static readonly object _daemonWaitLock = new();
-    private static bool _daemonWaitDone;
+    private readonly ConcurrentDictionary<string, string?> _paneShells = new();
+    // Panes whose session currently lives in the daemon.
+    private readonly ConcurrentDictionary<string, byte> _daemonPanes = new();
+    // Panes that were ever daemon-backed; they need an explicit CLOSE when the user closes them.
+    private readonly ConcurrentDictionary<string, byte> _everDaemonPanes = new();
+    private readonly ConcurrentDictionary<string, string?> _daemonCwd = new();
+    private readonly ConcurrentDictionary<string, int> _daemonPids = new();
+    private bool _sessionsStarted;
+    private bool _disposed;
 
     [ObservableProperty]
     private string _name;
@@ -37,22 +46,30 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     public event Action<string>? WorkingDirectoryChanged;
 
-    /// <summary>Gets the shell process PID from the focused pane session.</summary>
+    /// <summary>Raised when the last pane of this tab has closed; the owner should close the tab.</summary>
+    public event Action? LastPaneClosed;
+
+    public bool SessionsStarted => _sessionsStarted;
+
+    /// <summary>Gets the shell process PID of the focused pane (local process or daemon-reported).</summary>
     public int? ShellPid
     {
         get
         {
-            if (FocusedPaneId == null) return null;
-            var session = GetSession(FocusedPaneId);
-            return session?.ProcessId;
+            var paneId = FocusedPaneId;
+            if (paneId == null) return null;
+            if (_sessions.TryGetValue(paneId, out var session) && session.ProcessId is int localPid)
+                return localPid;
+            return _daemonPids.TryGetValue(paneId, out var daemonPid) ? daemonPid : null;
         }
     }
 
-    public SurfaceViewModel(Surface surface, string workspaceId, NotificationService notificationService)
+    public SurfaceViewModel(Surface surface, string workspaceId, NotificationService notificationService, string? initialWorkingDirectory = null)
     {
         Surface = surface;
         _workspaceId = workspaceId;
         _notificationService = notificationService;
+        _initialWorkingDirectory = WorkingDirectoryPolicy.Sanitize(initialWorkingDirectory);
         _name = surface.Name;
         _rootNode = surface.RootSplitNode;
         _focusedPaneId = surface.FocusedPaneId;
@@ -66,22 +83,17 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         daemon.BellReceived += OnDaemonBellReceived;
         daemon.Disconnected += OnDaemonDisconnected;
 
-        // Start terminal sessions for all leaf nodes
+        // Command history is small text; load it now so the history UI works before sessions start.
         foreach (var leaf in _rootNode.GetLeaves())
         {
-            if (leaf.PaneId != null)
+            if (leaf.PaneId == null) continue;
+            if (Surface.PaneSnapshots.TryGetValue(leaf.PaneId, out var snapshot) && snapshot.CommandHistory is { Count: > 0 })
             {
-                Surface.PaneSnapshots.TryGetValue(leaf.PaneId, out var snapshot);
-                if (snapshot?.CommandHistory is { Count: > 0 })
-                {
-                    _paneCommandHistory[leaf.PaneId] = snapshot.CommandHistory
-                        .Select(App.CommandLogService.SanitizeCommandForStorage)
-                        .Where(c => !string.IsNullOrWhiteSpace(c))
-                        .Cast<string>()
-                        .ToList();
-                }
-
-                StartSession(leaf.PaneId, snapshot?.WorkingDirectory, snapshot, snapshot?.Shell);
+                _paneCommandHistory[leaf.PaneId] = snapshot.CommandHistory
+                    .Select(App.CommandLogService.SanitizeCommandForStorage)
+                    .Where(c => !string.IsNullOrWhiteSpace(c))
+                    .Cast<string>()
+                    .ToList();
             }
         }
 
@@ -93,17 +105,49 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Starts a terminal session for every pane that has none yet. Restored panes get their stored
+    /// snapshot applied, after which the snapshot is dropped from the surface.
+    /// </summary>
+    public void EnsureSessionsStarted()
+    {
+        if (_sessionsStarted || _disposed) return;
+        _sessionsStarted = true;
+
+        var panes = RootNode.GetLeaves().Select(l => l.PaneId).Where(id => id != null).Cast<string>().ToList();
+        var firstPaneId = panes.FirstOrDefault();
+
+        foreach (var paneId in panes)
+        {
+            Surface.PaneSnapshots.TryGetValue(paneId, out var snapshot);
+            var cwd = paneId == firstPaneId ? _initialWorkingDirectory : null;
+
+            try
+            {
+                StartSession(paneId, cwd, snapshot, snapshot?.Shell);
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Could not start terminal session for pane {paneId}", ex);
+                continue;
+            }
+
+            if (snapshot != null)
+                Surface.PaneSnapshots.Remove(paneId);
+        }
+    }
+
     private void OnDaemonRawOutput(string paneId, byte[] data)
     {
-        if (!_daemonPanes.Contains(paneId)) return;
+        if (!_daemonPanes.ContainsKey(paneId)) return;
         if (_sessions.TryGetValue(paneId, out var session))
             session.FeedOutput(data);
     }
 
     private void OnDaemonCwdChanged(string paneId, string dir)
     {
-        if (!_daemonPanes.Contains(paneId)) return;
-        // Update the session's WorkingDirectory so it's captured in snapshots
+        if (!_daemonPanes.ContainsKey(paneId)) return;
+        _daemonCwd[paneId] = dir;
         if (_sessions.TryGetValue(paneId, out var session))
             session.WorkingDirectory = dir;
         if (paneId == FocusedPaneId)
@@ -112,24 +156,32 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     private void OnDaemonTitleChanged(string paneId, string title)
     {
-        if (!_daemonPanes.Contains(paneId)) return;
+        if (!_daemonPanes.ContainsKey(paneId)) return;
     }
 
     private void OnDaemonSessionExited(string paneId, int exitCode)
     {
-        if (!_daemonPanes.Contains(paneId)) return;
-        _daemonPanes.Remove(paneId);
+        if (!_daemonPanes.ContainsKey(paneId)) return;
+        // The daemon already dropped this session, so there is nothing to CLOSE.
+        _daemonPanes.TryRemove(paneId, out _);
+        _everDaemonPanes.TryRemove(paneId, out _);
+        if (_sessions.TryGetValue(paneId, out var session))
+        {
+            session.DaemonWrite = null;
+            session.DaemonResize = null;
+            OnPaneProcessExited(paneId, session);
+        }
     }
 
     private void OnDaemonBellReceived(string paneId)
     {
-        if (!_daemonPanes.Contains(paneId)) return;
+        if (!_daemonPanes.ContainsKey(paneId)) return;
     }
 
     private void OnDaemonDisconnected()
     {
         // Daemon died — fall back all daemon sessions to local ConPTY
-        var paneIds = _daemonPanes.ToList();
+        var paneIds = _daemonPanes.Keys.ToList();
         if (paneIds.Count == 0) return;
 
         DaemonLog($"[DaemonDisconnected] Falling back {paneIds.Count} sessions to local ConPTY");
@@ -159,6 +211,27 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
     public TerminalSession? GetSession(string paneId)
     {
         return _sessions.GetValueOrDefault(paneId);
+    }
+
+    /// <summary>
+    /// Best-known current directory of the focused pane, used as the start directory for a new
+    /// tab or split. Returns null when no usable directory is known.
+    /// </summary>
+    public string? GetFocusedWorkingDirectory()
+    {
+        var paneId = FocusedPaneId;
+        if (paneId == null) return null;
+
+        if (!_sessions.TryGetValue(paneId, out var session))
+            return WorkingDirectoryPolicy.Sanitize(Surface.PaneSnapshots.GetValueOrDefault(paneId)?.WorkingDirectory);
+
+        if (_daemonPanes.ContainsKey(paneId))
+        {
+            var cached = _daemonCwd.GetValueOrDefault(paneId);
+            return WorkingDirectoryPolicy.ChooseForNewPane(cached, session.WorkingDirectory, null);
+        }
+
+        return WorkingDirectoryPolicy.ChooseForNewPane(session.GetLiveWorkingDirectory(), session.WorkingDirectory, null);
     }
 
     public string GetPaneTitle(string paneId, string? fallbackTitle)
@@ -250,6 +323,7 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
         foreach (var paneId in activePaneIds)
         {
+            // Panes whose sessions have not started keep their stored snapshot untouched.
             if (!_sessions.TryGetValue(paneId, out var session))
                 continue;
 
@@ -339,49 +413,51 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         // Store the explicit override (null = use default shell from settings)
         _paneShells[paneId] = shell;
 
-        // Wait for daemon connect task (includes starting daemon if needed).
-        // First pane blocks up to 5s; subsequent panes get the cached result instantly.
-        lock (_daemonWaitLock)
+        try
         {
-            if (!_daemonWaitDone)
+            // Never block the UI thread waiting for the daemon. The daemon is opt-in and only
+            // used when it is already connected; otherwise panes run locally.
+            var connect = App.DaemonConnectTask;
+            bool daemonReady = connect.IsCompletedSuccessfully && connect.Result;
+
+            DaemonLog($"[StartSession:{paneId}] daemonReady={daemonReady}, IsConnected={App.DaemonClient.IsConnected}, TaskStatus={connect.Status}");
+
+            if (daemonReady)
             {
-                DaemonLog($"[StartSession:{paneId}] Waiting for daemon connect task...");
-                try { App.DaemonConnectTask.Wait(5000); }
-                catch { /* timeout or connect failure — proceed with local */ }
-                _daemonWaitDone = true;
+                try
+                {
+                    return StartDaemonSession(paneId, workingDirectory, restoredState, effectiveShell);
+                }
+                catch (Exception ex)
+                {
+                    DaemonLog($"[StartSession:{paneId}] Daemon session failed: {ex.Message}");
+                }
             }
+
+            DaemonLog($"[StartSession:{paneId}] Using LOCAL session");
+            return StartLocalSession(paneId, workingDirectory, restoredState, effectiveShell);
         }
-
-        var daemonReady = App.DaemonConnectTask.IsCompletedSuccessfully
-                          && App.DaemonConnectTask.Result;
-
-        DaemonLog($"[StartSession:{paneId}] daemonReady={daemonReady}, IsConnected={App.DaemonClient.IsConnected}, TaskStatus={App.DaemonConnectTask.Status}");
-
-        // Try daemon-backed session first
-        if (daemonReady)
+        catch
         {
-            try
-            {
-                return StartDaemonSession(paneId, workingDirectory, restoredState, effectiveShell);
-            }
-            catch (Exception ex)
-            {
-                DaemonLog($"[StartSession:{paneId}] Daemon session failed: {ex.Message}");
-            }
+            // Do not leave a half-registered session behind.
+            if (_sessions.TryRemove(paneId, out var failed))
+                failed.Dispose();
+            _paneShells.TryRemove(paneId, out _);
+            throw;
         }
-
-        DaemonLog($"[StartSession:{paneId}] Using LOCAL session");
-        return StartLocalSession(paneId, workingDirectory, restoredState, effectiveShell);
     }
 
     private static void DaemonLog(string message) => App.DaemonLog(message);
+
+    private static int GetScrollbackLines() =>
+        Math.Clamp(SettingsService.Current.ScrollbackLines, 100, 100_000);
 
     private TerminalSession StartDaemonSession(string paneId, string? workingDirectory, PaneStateSnapshot? restoredState, string? shell)
     {
         // Use saved snapshot dimensions if available (avoids spurious resize on reconnect)
         var initCols = restoredState?.BufferSnapshot?.Cols ?? 120;
         var initRows = restoredState?.BufferSnapshot?.Rows ?? 30;
-        var session = new TerminalSession(paneId, initCols, initRows);
+        var session = new TerminalSession(paneId, initCols, initRows, GetScrollbackLines());
         WireSessionEvents(session, paneId);
 
         // Set daemon delegates so Write/Resize route through daemon
@@ -390,7 +466,8 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         session.DaemonResize = (cols, rows) => daemon.ResizeAsync(paneId, cols, rows);
 
         _sessions[paneId] = session;
-        _daemonPanes.Add(paneId);
+        _daemonPanes[paneId] = 0;
+        _everDaemonPanes[paneId] = 0;
 
         var effectiveCwd = workingDirectory ?? restoredState?.WorkingDirectory;
 
@@ -406,18 +483,24 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
                 if (result == null)
                 {
                     DaemonLog($"[DaemonSession:{paneId}] CreateSessionAsync returned NULL — falling back to local");
-                    _daemonPanes.Remove(paneId);
+                    _daemonPanes.TryRemove(paneId, out _);
                     session.DaemonWrite = null;
                     session.DaemonResize = null;
                     session.Start(command: shell, workingDirectory: effectiveCwd);
                     return;
                 }
 
-                DaemonLog($"[DaemonSession:{paneId}] CreateSessionAsync OK: IsExisting={result.IsExisting}, IsRunning={result.IsRunning}, Cwd={result.WorkingDirectory}");
+                DaemonLog($"[DaemonSession:{paneId}] CreateSessionAsync OK: IsExisting={result.IsExisting}, IsRunning={result.IsRunning}");
+
+                if (result.Pid is int pid)
+                    _daemonPids[paneId] = pid;
 
                 // Set working directory from daemon response
                 if (!string.IsNullOrEmpty(result.WorkingDirectory))
+                {
                     session.WorkingDirectory = result.WorkingDirectory;
+                    _daemonCwd[paneId] = result.WorkingDirectory;
+                }
 
                 // If reconnecting to an existing daemon session, get the live buffer snapshot
                 if (result.IsExisting && result.IsRunning)
@@ -444,18 +527,12 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
                     {
                         DaemonLog($"[DaemonSession:{paneId}] GetSnapshotAsync returned null");
                     }
-
-                    // Send Enter after a brief delay to force the shell to print a fresh prompt.
-                    // The snapshot restores scrollback but the prompt line may be missing
-                    // because the shell already printed it before disconnect.
-                    await Task.Delay(300);
-                    await daemon.WriteAsync(paneId, [0x0d]); // CR = Enter
                 }
             }
             catch (Exception ex)
             {
                 DaemonLog($"[DaemonSession:{paneId}] Exception — falling back to local: {ex.Message}");
-                _daemonPanes.Remove(paneId);
+                _daemonPanes.TryRemove(paneId, out _);
                 session.DaemonWrite = null;
                 session.DaemonResize = null;
                 session.Start(command: shell, workingDirectory: effectiveCwd);
@@ -476,7 +553,7 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     private TerminalSession StartLocalSession(string paneId, string? workingDirectory, PaneStateSnapshot? restoredState, string? shell)
     {
-        var session = new TerminalSession(paneId);
+        var session = new TerminalSession(paneId, scrollbackLines: GetScrollbackLines());
         WireSessionEvents(session, paneId);
 
         _sessions[paneId] = session;
@@ -495,6 +572,8 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
             if (paneId == FocusedPaneId)
                 WorkingDirectoryChanged?.Invoke(dir);
         };
+
+        session.ProcessExited += () => OnPaneProcessExited(paneId, session);
 
         session.NotificationReceived += (title, subtitle, body) =>
         {
@@ -523,6 +602,19 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         };
     }
 
+    /// <summary>A pane's shell exited: like Windows Terminal, the pane closes.</summary>
+    private void OnPaneProcessExited(string paneId, TerminalSession session)
+    {
+        UiDispatch.Post(() =>
+        {
+            if (_disposed) return;
+            // Ignore events from sessions that were already replaced or closed.
+            if (!_sessions.TryGetValue(paneId, out var current) || !ReferenceEquals(current, session))
+                return;
+            ClosePane(paneId);
+        });
+    }
+
     [RelayCommand]
     public void SplitRight()
     {
@@ -535,25 +627,45 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         SplitFocused(SplitDirection.Horizontal);
     }
 
+    /// <summary>
+    /// Splits the focused pane. The new pane starts in the focused pane's current directory. Its
+    /// shell is started before the layout changes, so a failure leaves the layout untouched.
+    /// </summary>
     public void SplitFocused(SplitDirection direction, string? shell = null)
     {
-        if (FocusedPaneId == null) return;
+        var paneId = FocusedPaneId;
+        if (paneId == null || _disposed) return;
 
-        var node = RootNode.FindNode(FocusedPaneId);
+        var node = RootNode.FindNode(paneId);
         if (node == null || !node.IsLeaf) return;
 
-        var newChild = node.Split(direction);
-        if (newChild.PaneId != null)
+        var cwd = GetFocusedWorkingDirectory();
+        var effectiveShell = shell ?? _paneShells.GetValueOrDefault(paneId);
+        var newPaneId = Guid.NewGuid().ToString();
+
+        try
         {
-            var currentSession = GetSession(FocusedPaneId);
-            var cwd = currentSession?.WorkingDirectory;
-            var effectiveShell = shell ?? _paneShells.GetValueOrDefault(FocusedPaneId);
-            StartSession(newChild.PaneId, cwd, null, effectiveShell);
-            FocusedPaneId = newChild.PaneId;
+            StartSession(newPaneId, cwd, null, effectiveShell);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Split cancelled: the new pane's shell could not start", ex);
+            return;
         }
 
-        // Trigger UI update
+        node.Split(direction, newPaneId);
+        FocusedPaneId = newPaneId;
+
         OnPropertyChanged(nameof(RootNode));
+    }
+
+    /// <summary>Splits the focused pane along its longer side (pixel size of the pane).</summary>
+    public void SplitFocusedInLongerDirection(double containerWidth, double containerHeight)
+    {
+        var rect = RootNode.GetLeafRects().FirstOrDefault(r => r.PaneId == FocusedPaneId);
+        double width = rect.Width * containerWidth;
+        double height = rect.Height * containerHeight;
+        SplitFocused(width >= height ? SplitDirection.Vertical : SplitDirection.Horizontal);
     }
 
     public void OpenPaneWithShell(string shellPath)
@@ -567,33 +679,36 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         ClosePane(FocusedPaneId);
     }
 
+    /// <summary>
+    /// Closes a pane and its session. Closing the last pane raises <see cref="LastPaneClosed"/>
+    /// so the owner can close the tab.
+    /// </summary>
     public void ClosePane(string? paneId)
     {
-        if (paneId == null) return;
+        if (paneId == null || _disposed) return;
+
+        var leaves = RootNode.GetLeaves().ToList();
+        if (!leaves.Any(l => l.PaneId == paneId)) return;
 
         CapturePaneTranscript(paneId, "pane-close");
 
-        // Get adjacent pane before removal
-        var nextLeaf = RootNode.GetNextLeaf(paneId) ?? RootNode.GetPreviousLeaf(paneId);
-        string? nextPaneId = nextLeaf?.PaneId;
+        // Adjacent pane to focus after removal (computed before the tree changes).
+        string? nextPaneId = leaves.Count > 1
+            ? (RootNode.GetNextLeaf(paneId) ?? RootNode.GetPreviousLeaf(paneId))?.PaneId
+            : null;
 
-        // Stop and remove the session
-        if (_sessions.TryGetValue(paneId, out var session))
-        {
-            if (_daemonPanes.Remove(paneId))
-                _ = App.DaemonClient.CloseSessionAsync(paneId);
-            session.Dispose();
-            _sessions.Remove(paneId);
-        }
+        DisposePaneSession(paneId, closeDaemon: true);
 
         Surface.PaneCustomNames.Remove(paneId);
         Surface.PaneSnapshots.Remove(paneId);
         _paneCommandHistory.Remove(paneId);
-        _paneShells.Remove(paneId);
 
-        // If this is the only pane, don't remove it
-        var leaves = RootNode.GetLeaves().ToList();
-        if (leaves.Count <= 1) return;
+        if (leaves.Count <= 1)
+        {
+            FocusedPaneId = null;
+            LastPaneClosed?.Invoke();
+            return;
+        }
 
         RootNode.Remove(paneId);
 
@@ -601,6 +716,50 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
             FocusedPaneId = nextPaneId;
 
         OnPropertyChanged(nameof(RootNode));
+    }
+
+    private void DisposePaneSession(string paneId, bool closeDaemon)
+    {
+        bool wasDaemon = _everDaemonPanes.TryRemove(paneId, out _);
+        _daemonPanes.TryRemove(paneId, out _);
+        _daemonCwd.TryRemove(paneId, out _);
+        _daemonPids.TryRemove(paneId, out _);
+        _paneShells.TryRemove(paneId, out _);
+
+        if (_sessions.TryRemove(paneId, out var session))
+        {
+            session.DaemonWrite = null;
+            session.DaemonResize = null;
+            session.Dispose();
+        }
+
+        if (closeDaemon && wasDaemon)
+            _ = SendDaemonCloseAsync(paneId);
+    }
+
+    /// <summary>
+    /// Asks the daemon to end the sessions of every daemon-backed pane in this tab. Call before
+    /// <see cref="Dispose"/> when the user closes the tab (Dispose itself keeps daemon sessions alive).
+    /// </summary>
+    public void CloseDaemonSessions()
+    {
+        foreach (var paneId in _everDaemonPanes.Keys.ToList())
+        {
+            _everDaemonPanes.TryRemove(paneId, out _);
+            _ = SendDaemonCloseAsync(paneId);
+        }
+    }
+
+    private static async Task SendDaemonCloseAsync(string paneId)
+    {
+        try
+        {
+            await App.DaemonClient.CloseSessionAsync(paneId);
+        }
+        catch (Exception ex)
+        {
+            DaemonLog($"[CloseSession:{paneId}] failed: {ex.Message}");
+        }
     }
 
     public void FocusPane(string paneId)
@@ -627,6 +786,24 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
             FocusPane(prev.PaneId);
     }
 
+    /// <summary>Moves focus to the nearest pane in the given direction. Returns false if there is none.</summary>
+    public bool FocusInDirection(PaneDirection direction)
+    {
+        if (FocusedPaneId == null) return false;
+        var neighbor = RootNode.FindNeighborPaneId(FocusedPaneId, direction);
+        if (neighbor == null) return false;
+        FocusPane(neighbor);
+        return true;
+    }
+
+    /// <summary>Grows the focused pane toward <paramref name="direction"/>.</summary>
+    public bool ResizeFocusedPane(PaneDirection direction, double delta = 0.05)
+    {
+        if (FocusedPaneId == null) return false;
+        if (!RootNode.ResizePane(FocusedPaneId, direction, delta)) return false;
+        OnPropertyChanged(nameof(RootNode));
+        return true;
+    }
 
     [RelayCommand]
     public void ToggleZoom() => IsZoomed = !IsZoomed;
@@ -649,7 +826,8 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
-        CapturePaneSnapshotsForPersistence();
+        if (_disposed) return;
+        _disposed = true;
 
         // Unwire daemon events
         var daemon = App.DaemonClient;
@@ -660,6 +838,7 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         daemon.BellReceived -= OnDaemonBellReceived;
         daemon.Disconnected -= OnDaemonDisconnected;
 
+        // Local sessions are stopped; daemon sessions are deliberately left running.
         foreach (var session in _sessions.Values)
             session.Dispose();
         _sessions.Clear();

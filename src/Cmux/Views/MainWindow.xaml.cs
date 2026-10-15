@@ -13,6 +13,7 @@ using Cmux.Controls;
 using Cmux.Core.Services;
 using Cmux.ViewModels;
 using Cmux.Services;
+using PaneDirection = Cmux.Core.Models.PaneDirection;
 
 namespace Cmux.Views;
 
@@ -75,6 +76,7 @@ public partial class MainWindow : Window
         var theme = Cmux.Core.Config.TerminalThemes.GetEffective(settings);
 
         Opacity = Math.Clamp(settings.Opacity, 0.5, 1.0);
+        ApplyAutoSaveInterval(settings);
 
         // Update all visible terminal controls
         foreach (var workspace in ViewModel.Workspaces)
@@ -156,11 +158,10 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        // Restore window position from session state if available
-        var session = Cmux.Core.Services.SessionPersistenceService.Load();
-        if (session?.Window != null)
+        // Restore window position from the session state read at startup (parsed once).
+        var w = ViewModel.InitialWindowState;
+        if (w != null)
         {
-            var w = session.Window;
             if (w.Width > 0 && w.Height > 0)
             {
                 Left = w.X;
@@ -178,6 +179,7 @@ public partial class MainWindow : Window
         SizeChanged += (_, _) => UpdateWindowClip();
         StateChanged += (_, _) => UpdateWindowChrome();
         UpdateWindowClip();
+        _lastAutoSaveSignature = ViewModel.GetLayoutSignature();
 
         // Monitor daemon connection changes
         App.DaemonClient.Connected += () => Dispatcher.BeginInvoke(UpdateDaemonStatus);
@@ -219,10 +221,47 @@ public partial class MainWindow : Window
     private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
     {
         _uiRefreshTimer.Stop();
+        _autoSaveTimer?.Stop();
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
         App.AgentRuntime.RuntimeUpdated -= OnAgentRuntimeUpdated;
         App.AgentConversationStore.StoreChanged -= OnAgentConversationStoreChanged;
-        ViewModel.SaveSession(Left, Top, Width, Height, WindowState == WindowState.Maximized);
+        SaveSessionNow(captureTranscripts: true);
+    }
+
+    private void SaveSessionNow(bool captureTranscripts)
+    {
+        ViewModel.SaveSession(Left, Top, Width, Height, WindowState == WindowState.Maximized, captureTranscripts);
+    }
+
+    // --- Periodic autosave (interval from settings; skipped while the layout is unchanged) ---
+
+    private DispatcherTimer? _autoSaveTimer;
+    private string _lastAutoSaveSignature = "";
+
+    private void ApplyAutoSaveInterval(Cmux.Core.Config.CmuxSettings settings)
+    {
+        int seconds = settings.AutoSaveIntervalSeconds;
+        if (seconds <= 0)
+        {
+            _autoSaveTimer?.Stop();
+            return;
+        }
+
+        _autoSaveTimer ??= new DispatcherTimer();
+        _autoSaveTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(seconds, 5, 600));
+        _autoSaveTimer.Tick -= OnAutoSaveTick;
+        _autoSaveTimer.Tick += OnAutoSaveTick;
+        _autoSaveTimer.Start();
+    }
+
+    private void OnAutoSaveTick(object? sender, EventArgs e)
+    {
+        var signature = ViewModel.GetLayoutSignature();
+        if (signature == _lastAutoSaveSignature)
+            return;
+
+        _lastAutoSaveSignature = signature;
+        SaveSessionNow(captureTranscripts: false);
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -322,161 +361,145 @@ public partial class MainWindow : Window
             && string.Equals(update.SurfaceId, surface.Surface.Id, StringComparison.Ordinal);
     }
 
-    private void OnKeyDown(object sender, KeyEventArgs e)
+    /// <summary>
+    /// App shortcuts are handled while tunnelling (PreviewKeyDown), so they work even when a terminal
+    /// has focus. Alt chords arrive as Key.System, so the real key is read from SystemKey.
+    /// </summary>
+    // Set when the last key press was consumed as an app shortcut. WPF may still raise a TextInput
+    // for the same press (e.g. Alt+Shift+= producing "+"), which must not reach the terminal.
+    private bool _lastKeyWasShortcut;
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
-        bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
-        bool alt = (Keyboard.Modifiers & ModifierKeys.Alt) != 0;
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        var modifiers = Keyboard.Modifiers;
+        bool ctrl = modifiers.HasFlag(ModifierKeys.Control);
+        bool shift = modifiers.HasFlag(ModifierKeys.Shift);
+        bool alt = modifiers.HasFlag(ModifierKeys.Alt);
 
-        // === App-level shortcuts that always work, even with terminal focus ===
-
-        // Ctrl+Tab / Ctrl+Shift+Tab: cycle surfaces
-        if (ctrl && e.Key == Key.Tab)
-        {
-            if (shift)
-                ViewModel.SelectedWorkspace?.PreviousSurface();
-            else
-                ViewModel.SelectedWorkspace?.NextSurface();
+        _lastKeyWasShortcut = TryRunShortcut(key, ctrl, shift, alt);
+        if (_lastKeyWasShortcut)
             e.Handled = true;
-            return;
-        }
+    }
 
-        // Ctrl+Alt: pane focus + history picker
-        if (ctrl && alt && !shift)
-        {
-            switch (e.Key)
-            {
-                case Key.Right:
-                case Key.Down:
-                    ViewModel.SelectedWorkspace?.SelectedSurface?.FocusNextPane();
-                    e.Handled = true;
-                    return;
-                case Key.Left:
-                case Key.Up:
-                    ViewModel.SelectedWorkspace?.SelectedSurface?.FocusPreviousPane();
-                    e.Handled = true;
-                    return;
-                case Key.H: // Open command history picker (Ctrl+Alt+H)
-                    OpenCommandHistoryPicker();
-                    e.Handled = true;
-                    return;
-            }
-        }
+    private void OnPreviewTextInput(object sender, TextCompositionEventArgs e)
+    {
+        if (_lastKeyWasShortcut)
+            e.Handled = true;
+    }
 
-        // Ctrl+Shift: app-level shortcuts (split, zoom, search, surfaces, etc.)
-        if (ctrl && shift && !alt)
-        {
-            switch (e.Key)
-            {
-                case Key.W: // Close workspace
-                    ViewModel.CloseWorkspace(ViewModel.SelectedWorkspace);
-                    e.Handled = true;
-                    return;
-                case Key.R: // Rename workspace
-                    ViewModel.SelectedWorkspace?.Rename();
-                    e.Handled = true;
-                    return;
-                case Key.D: // Split down
-                    ViewModel.SelectedWorkspace?.SelectedSurface?.SplitDown();
-                    e.Handled = true;
-                    return;
-                case Key.U: // Jump to latest unread
-                    ViewModel.JumpToLatestUnread();
-                    e.Handled = true;
-                    return;
-                case Key.OemCloseBrackets: // Next surface (Ctrl+Shift+])
-                    ViewModel.SelectedWorkspace?.NextSurface();
-                    e.Handled = true;
-                    return;
-                case Key.OemOpenBrackets: // Previous surface (Ctrl+Shift+[)
-                    ViewModel.SelectedWorkspace?.PreviousSurface();
-                    e.Handled = true;
-                    return;
-                case Key.Z: // Zoom toggle (Ctrl+Shift+Z)
-                    ViewModel.SelectedWorkspace?.SelectedSurface?.ToggleZoom();
-                    e.Handled = true;
-                    return;
-                case Key.F: // Search (Ctrl+Shift+F)
-                    ToggleSearch();
-                    e.Handled = true;
-                    return;
-                case Key.P: // Command palette (Ctrl+Shift+P)
-                    ToggleCommandPalette();
-                    e.Handled = true;
-                    return;
-                case Key.L: // Logs (Ctrl+Shift+L)
-                    OpenLogsWindow();
-                    e.Handled = true;
-                    return;
-                case Key.V: // Session Vault (Ctrl+Shift+V)
-                    OpenSessionVault();
-                    e.Handled = true;
-                    return;
-                case Key.H: // History: insert last command (Ctrl+Shift+H)
-                    InsertLastCommandFromHistory();
-                    e.Handled = true;
-                    return;
-                case Key.A: // Toggle agent chat
-                    ToggleAgentChat();
-                    e.Handled = true;
-                    return;
-            }
-        }
+    private bool TryRunShortcut(Key key, bool ctrl, bool shift, bool alt)
+    {
+        var workspace = ViewModel.SelectedWorkspace;
+        var surface = workspace?.SelectedSurface;
 
-        // === Ctrl-only shortcuts (skip when terminal has focus to let terminal handle them) ===
-        if (ctrl && !alt && IsTerminalFocusActive())
-            return;
-
-        // Workspaces
+        // Ctrl+<key>
         if (ctrl && !shift && !alt)
         {
-            switch (e.Key)
+            if (key == Key.Tab) { workspace?.NextSurface(); return true; }
+            if (key == Key.OemComma) { OpenSettings(); return true; }
+            if (TryGetDigit(key, out int tab))
             {
-                case Key.N: // New workspace
-                    ViewModel.CreateNewWorkspace();
-                    e.Handled = true;
-                    return;
-                case Key.B: // Toggle sidebar
-                    ViewModel.ToggleSidebar();
-                    e.Handled = true;
-                    return;
-                case Key.I: // Notification panel
-                    ViewModel.ToggleNotificationPanel();
-                    e.Handled = true;
-                    return;
-                case Key.T: // New surface
-                    ViewModel.SelectedWorkspace?.CreateNewSurface();
-                    e.Handled = true;
-                    return;
-                case Key.W: // Close surface
-                    var surface = ViewModel.SelectedWorkspace?.SelectedSurface;
-                    if (surface != null)
-                        ViewModel.SelectedWorkspace?.CloseSurface(surface);
-                    e.Handled = true;
-                    return;
-                case Key.D: // Split right
-                    ViewModel.SelectedWorkspace?.SelectedSurface?.SplitRight();
-                    e.Handled = true;
-                    return;
-                // Workspace 1-8
-                case Key.D1: ViewModel.SelectWorkspace(0); e.Handled = true; return;
-                case Key.D2: ViewModel.SelectWorkspace(1); e.Handled = true; return;
-                case Key.D3: ViewModel.SelectWorkspace(2); e.Handled = true; return;
-                case Key.D4: ViewModel.SelectWorkspace(3); e.Handled = true; return;
-                case Key.D5: ViewModel.SelectWorkspace(4); e.Handled = true; return;
-                case Key.D6: ViewModel.SelectWorkspace(5); e.Handled = true; return;
-                case Key.D7: ViewModel.SelectWorkspace(6); e.Handled = true; return;
-                case Key.D8: ViewModel.SelectWorkspace(7); e.Handled = true; return;
-                case Key.D9: // Last workspace
-                    if (ViewModel.Workspaces.Count > 0)
-                        ViewModel.SelectWorkspace(ViewModel.Workspaces.Count - 1);
-                    e.Handled = true;
-                    return;
-                case Key.OemComma: // Settings (Ctrl+,)
-                    OpenSettings();
-                    e.Handled = true;
-                    return;
+                if (workspace != null)
+                    workspace.SelectSurface(tab == 9 ? workspace.Surfaces.Count - 1 : tab - 1);
+                return true;
             }
+            return false;
+        }
+
+        // Ctrl+Shift+<key>
+        if (ctrl && shift && !alt)
+        {
+            switch (key)
+            {
+                case Key.Tab: workspace?.PreviousSurface(); return true;
+                case Key.T: workspace?.CreateNewSurface(); return true;
+                case Key.W: surface?.ClosePane(); return true;
+                case Key.Z: surface?.ToggleZoom(); return true;
+                case Key.E: surface?.EqualizePanes(); return true;
+                case Key.N: ViewModel.CreateNewWorkspace(); return true;
+                case Key.B: ViewModel.ToggleSidebar(); return true;
+                case Key.I: ViewModel.ToggleNotificationPanel(); return true;
+                case Key.P: ToggleCommandPalette(); return true;
+                case Key.F: ToggleSearch(); return true;
+                case Key.S: OpenSessionVault(); return true;
+                case Key.L: OpenLogsWindow(); return true;
+                case Key.U: ViewModel.JumpToLatestUnread(); return true;
+                case Key.H: InsertLastCommandFromHistory(); return true;
+                case Key.A: ToggleAgentChat(); return true;
+            }
+            return false;
+        }
+
+        // Ctrl+Alt+<key>
+        if (ctrl && alt && !shift)
+        {
+            if (key == Key.H) { OpenCommandHistoryPicker(); return true; }
+            if (TryGetDigit(key, out int ws))
+            {
+                ViewModel.SelectWorkspace(ws == 9 ? ViewModel.Workspaces.Count - 1 : ws - 1);
+                return true;
+            }
+            return false;
+        }
+
+        // Alt+Shift+<key>: splits and resize
+        if (alt && shift && !ctrl)
+        {
+            switch (key)
+            {
+                case Key.OemPlus: surface?.SplitRight(); return true;
+                case Key.OemMinus: surface?.SplitDown(); return true;
+                case Key.D:
+                    surface?.SplitFocusedInLongerDirection(ContentArea.ActualWidth, ContentArea.ActualHeight);
+                    return true;
+            }
+
+            if (TryGetDirection(key, out var resizeDir))
+            {
+                surface?.ResizeFocusedPane(resizeDir);
+                return true;
+            }
+            return false;
+        }
+
+        // Alt+<arrow>: pane focus
+        if (alt && !ctrl && !shift && TryGetDirection(key, out var focusDir))
+        {
+            surface?.FocusInDirection(focusDir);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetDigit(Key key, out int digit)
+    {
+        digit = key switch
+        {
+            Key.D1 => 1,
+            Key.D2 => 2,
+            Key.D3 => 3,
+            Key.D4 => 4,
+            Key.D5 => 5,
+            Key.D6 => 6,
+            Key.D7 => 7,
+            Key.D8 => 8,
+            Key.D9 => 9,
+            _ => 0,
+        };
+        return digit > 0;
+    }
+
+    private static bool TryGetDirection(Key key, out PaneDirection direction)
+    {
+        switch (key)
+        {
+            case Key.Left: direction = PaneDirection.Left; return true;
+            case Key.Right: direction = PaneDirection.Right; return true;
+            case Key.Up: direction = PaneDirection.Up; return true;
+            case Key.Down: direction = PaneDirection.Down; return true;
+            default: direction = default; return false;
         }
     }
 
@@ -647,6 +670,8 @@ public partial class MainWindow : Window
     // Toolbar handlers
     private void ToolbarSplitRight_Click(object sender, RoutedEventArgs e) => ViewModel.SelectedWorkspace?.SelectedSurface?.SplitRight();
     private void ToolbarSplitDown_Click(object sender, RoutedEventArgs e) => ViewModel.SelectedWorkspace?.SelectedSurface?.SplitDown();
+    private void ToolbarSplitLonger_Click(object sender, RoutedEventArgs e) =>
+        ViewModel.SelectedWorkspace?.SelectedSurface?.SplitFocusedInLongerDirection(ContentArea.ActualWidth, ContentArea.ActualHeight);
     private void ShellSelector_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button) return;
@@ -1070,46 +1095,38 @@ public partial class MainWindow : Window
             AgentMessagesList.ScrollIntoView(AgentMessagesList.Items[AgentMessagesList.Items.Count - 1]);
     }
 
-    private static bool IsTerminalFocusActive()
-    {
-        var current = Keyboard.FocusedElement as DependencyObject;
-        while (current != null)
-        {
-            if (current is TerminalControl)
-                return true;
-
-            current = VisualTreeHelper.GetParent(current);
-        }
-
-        return false;
-    }
-
     private List<PaletteItem> BuildPaletteItems()
     {
         return
         [
-            new() { Id = "new-workspace", Label = "New Workspace", Icon = "\uE710", Shortcut = "Ctrl+N", Category = "Workspace", Execute = () => ViewModel.CreateNewWorkspace() },
-            new() { Id = "new-surface", Label = "New Surface", Icon = "\uE710", Shortcut = "Ctrl+T", Category = "Surface", Execute = () => ViewModel.SelectedWorkspace?.CreateNewSurface() },
-            new() { Id = "close-surface", Label = "Close Surface", Icon = "\uE711", Shortcut = "Ctrl+W", Category = "Surface", Execute = () => { var s = ViewModel.SelectedWorkspace?.SelectedSurface; if (s != null) ViewModel.SelectedWorkspace?.CloseSurface(s); } },
-            new() { Id = "close-workspace", Label = "Close Workspace", Icon = "\uE711", Shortcut = "Ctrl+Shift+W", Category = "Workspace", Execute = () => ViewModel.CloseWorkspace(ViewModel.SelectedWorkspace) },
-            new() { Id = "split-right", Label = "Split Right", Icon = "\uE26B", Shortcut = "Ctrl+D", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.SplitRight() },
-            new() { Id = "split-down", Label = "Split Down", Icon = "\uE74B", Shortcut = "Ctrl+Shift+D", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.SplitDown() },
-            new() { Id = "toggle-sidebar", Label = "Toggle Sidebar", Icon = "\uE700", Shortcut = "Ctrl+B", Category = "View", Execute = () => ViewModel.ToggleSidebar() },
-            new() { Id = "notifications", Label = "Notifications", Icon = "\uEA8F", Shortcut = "Ctrl+I", Category = "View", Execute = () => ViewModel.ToggleNotificationPanel() },
+            new() { Id = "new-workspace", Label = "New Workspace", Icon = "\uE710", Shortcut = "Ctrl+Shift+N", Category = "Workspace", Execute = () => ViewModel.CreateNewWorkspace() },
+            new() { Id = "new-surface", Label = "New Tab", Icon = "\uE710", Shortcut = "Ctrl+Shift+T", Category = "Tab", Execute = () => ViewModel.SelectedWorkspace?.CreateNewSurface() },
+            new() { Id = "close-pane", Label = "Close Pane", Icon = "\uE711", Shortcut = "Ctrl+Shift+W", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.ClosePane() },
+            new() { Id = "close-tab", Label = "Close Tab", Icon = "\uE711", Category = "Tab", Execute = () => { var s = ViewModel.SelectedWorkspace?.SelectedSurface; if (s != null) ViewModel.SelectedWorkspace?.CloseSurface(s); } },
+            new() { Id = "rename-tab", Label = "Rename Tab", Icon = "\uE70F", Category = "Tab", Execute = () => ViewModel.SelectedWorkspace?.Rename() },
+            new() { Id = "close-workspace", Label = "Close Workspace", Icon = "\uE711", Category = "Workspace", Execute = () => ViewModel.CloseWorkspace(ViewModel.SelectedWorkspace) },
+            new() { Id = "split-right", Label = "Split Right", Icon = "\uE26B", Shortcut = "Alt+Shift+=", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.SplitRight() },
+            new() { Id = "split-down", Label = "Split Down", Icon = "\uE74B", Shortcut = "Alt+Shift+-", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.SplitDown() },
+            new() { Id = "split-longer", Label = "Split Longer Side", Icon = "\uE26B", Shortcut = "Alt+Shift+D", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.SplitFocusedInLongerDirection(ContentArea.ActualWidth, ContentArea.ActualHeight) },
+            new() { Id = "toggle-sidebar", Label = "Toggle Sidebar", Icon = "\uE700", Shortcut = "Ctrl+Shift+B", Category = "View", Execute = () => ViewModel.ToggleSidebar() },
+            new() { Id = "notifications", Label = "Notifications", Icon = "\uEA8F", Shortcut = "Ctrl+Shift+I", Category = "View", Execute = () => ViewModel.ToggleNotificationPanel() },
             new() { Id = "test-notification", Label = "Test Notification", Icon = "\uE7F4", Category = "View", Execute = ShowTestNotification },
             new() { Id = "open-logs", Label = "Open Command Logs", Icon = "\uE7BA", Shortcut = "Ctrl+Shift+L", Category = "Logs", Execute = OpenLogsWindow },
-            new() { Id = "open-session-vault", Label = "Open Session Vault", Icon = "\uE8D1", Shortcut = "Ctrl+Shift+V", Category = "Logs", Execute = OpenSessionVault },
+            new() { Id = "open-session-vault", Label = "Open Session Vault", Icon = "\uE8D1", Shortcut = "Ctrl+Shift+S", Category = "Logs", Execute = OpenSessionVault },
             new() { Id = "open-command-history", Label = "Open Command History", Icon = "\uE81C", Shortcut = "Ctrl+Alt+H", Category = "History", Execute = OpenCommandHistoryPicker },
             new() { Id = "insert-last-command", Label = "Insert Last Command", Icon = "\uE8A7", Shortcut = "Ctrl+Shift+H", Category = "History", Execute = InsertLastCommandFromHistory },
+            new() { Id = "jump-unread", Label = "Jump to Latest Unread", Icon = "\uEA8F", Shortcut = "Ctrl+Shift+U", Category = "View", Execute = () => ViewModel.JumpToLatestUnread() },
             new() { Id = "search", Label = "Search", Icon = "\uE721", Shortcut = "Ctrl+Shift+F", Category = "View", Execute = () => ToggleSearch() },
             new() { Id = "toggle-agent-chat", Label = "Toggle Agent Chat", Icon = "\uE11B", Shortcut = "Ctrl+Shift+A", Category = "View", Execute = ToggleAgentChat },
             new() { Id = "zoom-pane", Label = "Zoom Pane", Icon = "\uE740", Shortcut = "Ctrl+Shift+Z", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.ToggleZoom() },
-            new() { Id = "focus-next", Label = "Focus Next Pane", Icon = "\uE76C", Shortcut = "Ctrl+Alt+Right", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.FocusNextPane() },
-            new() { Id = "focus-prev", Label = "Focus Previous Pane", Icon = "\uE76B", Shortcut = "Ctrl+Alt+Left", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.FocusPreviousPane() },
-            new() { Id = "next-surface", Label = "Next Surface", Icon = "\uE76C", Shortcut = "Ctrl+Tab", Category = "Surface", Execute = () => ViewModel.SelectedWorkspace?.NextSurface() },
-            new() { Id = "prev-surface", Label = "Previous Surface", Icon = "\uE76B", Shortcut = "Ctrl+Shift+Tab", Category = "Surface", Execute = () => ViewModel.SelectedWorkspace?.PreviousSurface() },
+            new() { Id = "focus-right", Label = "Focus Pane Right", Icon = "\uE76C", Shortcut = "Alt+Right", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.FocusInDirection(PaneDirection.Right) },
+            new() { Id = "focus-left", Label = "Focus Pane Left", Icon = "\uE76B", Shortcut = "Alt+Left", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.FocusInDirection(PaneDirection.Left) },
+            new() { Id = "focus-down", Label = "Focus Pane Down", Icon = "\uE74B", Shortcut = "Alt+Down", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.FocusInDirection(PaneDirection.Down) },
+            new() { Id = "focus-up", Label = "Focus Pane Up", Icon = "\uE74A", Shortcut = "Alt+Up", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.FocusInDirection(PaneDirection.Up) },
+            new() { Id = "next-surface", Label = "Next Tab", Icon = "\uE76C", Shortcut = "Ctrl+Tab", Category = "Tab", Execute = () => ViewModel.SelectedWorkspace?.NextSurface() },
+            new() { Id = "prev-surface", Label = "Previous Tab", Icon = "\uE76B", Shortcut = "Ctrl+Shift+Tab", Category = "Tab", Execute = () => ViewModel.SelectedWorkspace?.PreviousSurface() },
             new() { Id = "settings", Label = "Settings", Icon = "\uE713", Shortcut = "Ctrl+,", Category = "App", Execute = () => OpenSettings() },
-            new() { Id = "equalize", Label = "Equalize Panes", Icon = "\uE9D5", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.EqualizePanes() },
+            new() { Id = "equalize", Label = "Equalize Panes", Icon = "\uE9D5", Shortcut = "Ctrl+Shift+E", Category = "Pane", Execute = () => ViewModel.SelectedWorkspace?.SelectedSurface?.EqualizePanes() },
             new() { Id = "layout-2col", Label = "Layout: 2 Columns", Icon = "\uE745", Category = "Layout", Execute = () => ApplyLayout(2, 1) },
             new() { Id = "layout-3col", Label = "Layout: 3 Columns", Icon = "\uE745", Category = "Layout", Execute = () => ApplyLayout(3, 1) },
             new() { Id = "layout-grid", Label = "Layout: Grid 2x2", Icon = "\uF0E2", Category = "Layout", Execute = () => ApplyLayout(2, 2) },

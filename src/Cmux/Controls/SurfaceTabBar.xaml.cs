@@ -9,6 +9,7 @@ namespace Cmux.Controls;
 public partial class SurfaceTabBar : UserControl
 {
     private SurfaceViewModel? _renamingSurface;
+    private Point _tabDragStart;
 
     public event Action<string>? SearchTextChanged;
     public event Action? NextMatchRequested;
@@ -17,6 +18,15 @@ public partial class SurfaceTabBar : UserControl
     public SurfaceTabBar()
     {
         InitializeComponent();
+        DataContextChanged += OnWorkspaceDataContextChanged;
+    }
+
+    private void OnWorkspaceDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.OldValue is WorkspaceViewModel oldWorkspace)
+            oldWorkspace.SurfaceRenameRequested -= BeginRename;
+        if (e.NewValue is WorkspaceViewModel newWorkspace)
+            newWorkspace.SurfaceRenameRequested += BeginRename;
     }
 
     public void FocusSearch()
@@ -68,17 +78,58 @@ public partial class SurfaceTabBar : UserControl
         {
             if (e.ClickCount == 2)
             {
-                _renamingSurface = surface;
-                TabRenameBox.Text = surface.Name;
-                TabRenameBox.Visibility = Visibility.Visible;
-                TabRenameBox.SelectAll();
-                TabRenameBox.Focus();
+                BeginRename(surface);
                 e.Handled = true;
                 return;
             }
             if (DataContext is WorkspaceViewModel workspace)
                 workspace.SelectedSurface = surface;
         }
+    }
+
+    // --- Tab drag-and-drop reordering (mirrors the workspace sidebar) ---
+
+    private void Tab_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        _tabDragStart = e.GetPosition(null);
+    }
+
+    private void Tab_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed) return;
+
+        var diff = _tabDragStart - e.GetPosition(null);
+        if (Math.Abs(diff.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(diff.Y) < SystemParameters.MinimumVerticalDragDistance)
+            return;
+
+        if (sender is FrameworkElement fe && fe.DataContext is SurfaceViewModel surface)
+            DragDrop.DoDragDrop(fe, surface, DragDropEffects.Move);
+    }
+
+    private void Tab_Drop(object sender, DragEventArgs e)
+    {
+        if (sender is not FrameworkElement fe) return;
+        if (fe.DataContext is not SurfaceViewModel target) return;
+        if (DataContext is not WorkspaceViewModel workspace) return;
+
+        var source = e.Data.GetData(typeof(SurfaceViewModel)) as SurfaceViewModel;
+        if (source == null || source == target) return;
+
+        int sourceIndex = workspace.Surfaces.IndexOf(source);
+        int targetIndex = workspace.Surfaces.IndexOf(target);
+        workspace.MoveSurface(sourceIndex, targetIndex);
+    }
+
+    // --- Rename ---
+
+    private void BeginRename(SurfaceViewModel surface)
+    {
+        _renamingSurface = surface;
+        TabRenameBox.Text = surface.Name;
+        TabRenameBox.Visibility = Visibility.Visible;
+        TabRenameBox.SelectAll();
+        TabRenameBox.Focus();
     }
 
     private void CloseTab_Click(object sender, RoutedEventArgs e)
@@ -100,17 +151,13 @@ public partial class SurfaceTabBar : UserControl
     {
         var surface = GetSurfaceFromMenu(sender);
         if (surface == null) return;
-        _renamingSurface = surface;
-        TabRenameBox.Text = surface.Name;
-        TabRenameBox.Visibility = Visibility.Visible;
-        TabRenameBox.SelectAll();
-        TabRenameBox.Focus();
+        BeginRename(surface);
     }
 
     private void FinishTabRename(bool save)
     {
-        if (_renamingSurface != null && save)
-            _renamingSurface.Name = TabRenameBox.Text;
+        if (_renamingSurface != null && save && !string.IsNullOrWhiteSpace(TabRenameBox.Text))
+            _renamingSurface.Name = TabRenameBox.Text.Trim();
         _renamingSurface = null;
         TabRenameBox.Visibility = Visibility.Collapsed;
     }
@@ -125,13 +172,9 @@ public partial class SurfaceTabBar : UserControl
 
     private void DuplicateTab_Click(object sender, RoutedEventArgs e)
     {
-        if (DataContext is WorkspaceViewModel ws)
-        {
-            ws.CreateNewSurface();
-            var newSurf = ws.Surfaces[^1];
-            var original = GetSurfaceFromMenu(sender);
-            if (original != null) newSurf.Name = original.Name + " (copy)";
-        }
+        var original = GetSurfaceFromMenu(sender);
+        if (original != null && DataContext is WorkspaceViewModel ws)
+            ws.DuplicateSurface(original);
     }
 
     private void SplitRight_Click(object sender, RoutedEventArgs e)

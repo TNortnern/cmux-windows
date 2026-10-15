@@ -22,7 +22,11 @@
                 <DataTemplate DataType="{x:Type vm:SurfaceViewModel}">
                     <Border x:Name="tabBorder" Padding="14,6" Cursor="Hand"
                             Margin="2,4,2,4" CornerRadius="6"
-                            MouseLeftButtonDown="Tab_Click">
+                            AllowDrop="True"
+                            MouseLeftButtonDown="Tab_Click"
+                            PreviewMouseLeftButtonDown="Tab_PreviewMouseDown"
+                            PreviewMouseMove="Tab_PreviewMouseMove"
+                            Drop="Tab_Drop">
                         <Border.Background>
                             <SolidColorBrush x:Name="tabBg" Color="Transparent" />
                         </Border.Background>
@@ -31,10 +35,10 @@
                                 <MenuItem Header="Rename" Click="RenameTab_Click" />
                                 <MenuItem Header="Duplicate" Click="DuplicateTab_Click" />
                                 <Separator />
-                                <MenuItem Header="Split Right" InputGestureText="Ctrl+D" Click="SplitRight_Click" />
-                                <MenuItem Header="Split Down" InputGestureText="Ctrl+Shift+D" Click="SplitDown_Click" />
+                                <MenuItem Header="Split Right" InputGestureText="Alt+Shift+=" Click="SplitRight_Click" />
+                                <MenuItem Header="Split Down" InputGestureText="Alt+Shift+-" Click="SplitDown_Click" />
                                 <Separator />
-                                <MenuItem Header="Close" InputGestureText="Ctrl+W" Click="CloseThisTab_Click" />
+                                <MenuItem Header="Close Tab" Click="CloseThisTab_Click" />
                                 <MenuItem Header="Close Others" Click="CloseOtherTabs_Click" />
                             </ContextMenu>
                         </Border.ContextMenu>
@@ -155,7 +159,7 @@
         <!-- Add surface button -->
         <Button Grid.Column="2" Content="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                 Style="{StaticResource CmuxButton}"
-                Click="AddTab_Click"
+                Click="AddTab_Click" ToolTip="New Tab (Ctrl+Shift+T)"
                 Padding="8,0" Margin="2,2,4,2" Opacity="0.6" />
 
         <!-- Inline rename overlay -->

@@ -68,7 +68,7 @@
                     </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
-                <MenuItem Header="New Surface" InputGestureText="Ctrl+T" Click="NewSurface_Click">
+                <MenuItem Header="New Tab" InputGestureText="Ctrl+Shift+T" Click="NewSurface_Click">
                     <MenuItem.Icon>
                         <TextBlock Text="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="12" />
                     </MenuItem.Icon>
@@ -85,7 +85,7 @@
                     </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
-                <MenuItem Header="Close Workspace" InputGestureText="Ctrl+Shift+W" Click="Close_Click"
+                <MenuItem Header="Close Workspace" Click="Close_Click"
                           Foreground="#FFEF4444">
                     <MenuItem.Icon>
                         <TextBlock Text="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="12"
