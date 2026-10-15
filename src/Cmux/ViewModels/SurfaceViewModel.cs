@@ -21,7 +21,9 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
     private readonly NotificationService _notificationService;
     private readonly string? _initialWorkingDirectory;
     private readonly ConcurrentDictionary<string, TerminalSession> _sessions = new();
+    // Written from the session read thread (prompt markers) and the UI thread; guarded by _commandHistoryLock.
     private readonly Dictionary<string, List<string>> _paneCommandHistory = [];
+    private readonly object _commandHistoryLock = new();
     private readonly ConcurrentDictionary<string, string?> _paneShells = new();
     // Panes whose session currently lives in the daemon.
     private readonly ConcurrentDictionary<string, byte> _daemonPanes = new();
@@ -153,8 +155,11 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         _daemonCwd[paneId] = dir;
         if (_sessions.TryGetValue(paneId, out var session))
             session.WorkingDirectory = dir;
-        if (paneId == FocusedPaneId)
-            WorkingDirectoryChanged?.Invoke(dir);
+        UiDispatch.Post(() =>
+        {
+            if (paneId == FocusedPaneId)
+                WorkingDirectoryChanged?.Invoke(dir);
+        });
     }
 
     private void OnDaemonTitleChanged(string paneId, string title)
@@ -257,9 +262,12 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     public IReadOnlyList<string> GetCommandHistory(string paneId)
     {
-        return _paneCommandHistory.TryGetValue(paneId, out var history)
-            ? history.AsReadOnly()
-            : [];
+        lock (_commandHistoryLock)
+        {
+            return _paneCommandHistory.TryGetValue(paneId, out var history)
+                ? history.ToList()
+                : [];
+        }
     }
 
     private static bool ShouldCaptureTranscript(string reason)
@@ -280,7 +288,7 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         if (!_sessions.TryGetValue(paneId, out var session))
             return null;
 
-        var text = session.Buffer.ExportPlainText(maxScrollbackLines: 20000);
+        var text = session.ExportPlainText(maxScrollbackLines: 20000);
         if (string.IsNullOrWhiteSpace(text))
             return null;
 
@@ -339,8 +347,11 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
             state.Shell = _paneShells.GetValueOrDefault(paneId);
             state.BufferSnapshot = session.CreateBufferSnapshot(maxScrollbackLines: 3000);
 
-            if (_paneCommandHistory.TryGetValue(paneId, out var history))
-                state.CommandHistory = history.TakeLast(500).ToList();
+            lock (_commandHistoryLock)
+            {
+                if (_paneCommandHistory.TryGetValue(paneId, out var history))
+                    state.CommandHistory = history.TakeLast(500).ToList();
+            }
 
             Surface.PaneSnapshots[paneId] = state;
         }
@@ -397,21 +408,24 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     private void AppendToCommandHistory(string paneId, string command)
     {
-        if (!_paneCommandHistory.TryGetValue(paneId, out var history))
-        {
-            history = [];
-            _paneCommandHistory[paneId] = history;
-        }
-
         var trimmed = command.Trim();
         if (string.IsNullOrWhiteSpace(trimmed))
             return;
 
-        if (history.Count == 0 || !string.Equals(history[^1], trimmed, StringComparison.Ordinal))
-            history.Add(trimmed);
+        lock (_commandHistoryLock)
+        {
+            if (!_paneCommandHistory.TryGetValue(paneId, out var history))
+            {
+                history = [];
+                _paneCommandHistory[paneId] = history;
+            }
 
-        while (history.Count > 500)
-            history.RemoveAt(0);
+            if (history.Count == 0 || !string.Equals(history[^1], trimmed, StringComparison.Ordinal))
+                history.Add(trimmed);
+
+            while (history.Count > 500)
+                history.RemoveAt(0);
+        }
     }
 
     private TerminalSession StartSession(string paneId, string? workingDirectory = null, PaneStateSnapshot? restoredState = null, string? shell = null)
@@ -576,8 +590,11 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
     {
         session.WorkingDirectoryChanged += dir =>
         {
-            if (paneId == FocusedPaneId)
-                WorkingDirectoryChanged?.Invoke(dir);
+            UiDispatch.Post(() =>
+            {
+                if (paneId == FocusedPaneId)
+                    WorkingDirectoryChanged?.Invoke(dir);
+            });
         };
 
         session.ProcessExited += () => OnPaneProcessExited(paneId, session);
@@ -585,9 +602,9 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         session.NotificationReceived += (title, subtitle, body) =>
         {
             var source = NotificationSource.Osc9; // Default
-            _notificationService.AddNotification(
+            UiDispatch.Post(() => _notificationService.AddNotification(
                 _workspaceId, Surface.Id, paneId,
-                title, subtitle, body, source);
+                title, subtitle, body, source));
         };
 
         session.ShellPromptMarker += (marker, payload) =>
@@ -640,6 +657,9 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
     /// </summary>
     public void SplitFocused(SplitDirection direction, string? shell = null)
     {
+        // Start the existing panes first; a later EnsureSessionsStarted would replace the new pane's session.
+        if (!_sessionsStarted) EnsureSessionsStarted();
+
         var paneId = FocusedPaneId;
         if (paneId == null || _disposed) return;
 
@@ -708,7 +728,10 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
         Surface.PaneCustomNames.Remove(paneId);
         Surface.PaneSnapshots.Remove(paneId);
-        _paneCommandHistory.Remove(paneId);
+        lock (_commandHistoryLock)
+        {
+            _paneCommandHistory.Remove(paneId);
+        }
 
         if (leaves.Count <= 1)
         {

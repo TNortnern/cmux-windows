@@ -208,6 +208,21 @@ internal static partial class ConPtyInterop
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DuplicateHandle(
+        IntPtr hSourceProcessHandle,
+        IntPtr hSourceHandle,
+        IntPtr hTargetProcessHandle,
+        out IntPtr lpTargetHandle,
+        uint dwDesiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle,
+        uint dwOptions);
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentProcess();
+
+    internal const uint DUPLICATE_SAME_ACCESS = 0x00000002;
     internal const uint INFINITE = 0xFFFFFFFF;
     internal const uint WAIT_OBJECT_0 = 0x00000000;
 }

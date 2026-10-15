@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using Cmux.Core.Services;
 
 namespace Cmux.Core.IPC;
@@ -20,7 +21,10 @@ public sealed class DaemonClient : IDisposable
 
     // Requests awaiting a response, keyed by DaemonRequest.Id. The listen loop completes them.
     private readonly ConcurrentDictionary<string, TaskCompletionSource<DaemonResponse?>> _pending = new();
-    private readonly object _writeLock = new();
+
+    // Outgoing request lines for the current connection. A single writer task drains it, so no caller
+    // (including the UI thread) ever blocks on the pipe.
+    private volatile Channel<string>? _outbox;
 
     public bool IsConnected => _pipe?.IsConnected == true && _connected;
 
@@ -53,8 +57,11 @@ public sealed class DaemonClient : IDisposable
             _pipe = pipe;
             _reader = reader;
             _connected = true;
+            var outbox = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+            _outbox = outbox;
+            StartWriter(pipe, outbox);
             pipe = null; // now owned by this client
-            StartListening(reader);
+            StartListening(reader, outbox);
             LogDaemon("[Connect] Pipe connected, reader ready.");
             return true;
         }
@@ -181,12 +188,29 @@ public sealed class DaemonClient : IDisposable
         return null;
     }
 
-    private void StartListening(StreamReader reader)
+    /// <summary>Drains request lines to the pipe, so callers only enqueue and never wait on a write.</summary>
+    private static void StartWriter(NamedPipeClientStream pipe, Channel<string> outbox)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var line in outbox.Reader.ReadAllAsync())
+                    await pipe.WriteAsync(Encoding.UTF8.GetBytes(line + "\n")).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                LogDaemon($"[Write] Pipe writer stopped: {ex.GetType().Name}");
+            }
+        });
+    }
+
+    private void StartListening(StreamReader reader, Channel<string> outbox)
     {
         _listenCts = new CancellationTokenSource();
         var ct = _listenCts.Token;
         // Dedicated thread: ReadLine blocks.
-        var thread = new Thread(() => ListenLoop(reader, ct))
+        var thread = new Thread(() => ListenLoop(reader, outbox, ct))
         {
             IsBackground = true,
             Name = "DaemonClient-Listen",
@@ -194,7 +218,7 @@ public sealed class DaemonClient : IDisposable
         thread.Start();
     }
 
-    private void ListenLoop(StreamReader reader, CancellationToken ct)
+    private void ListenLoop(StreamReader reader, Channel<string> outbox, CancellationToken ct)
     {
         try
         {
@@ -202,20 +226,43 @@ public sealed class DaemonClient : IDisposable
             {
                 var line = reader.ReadLine();
                 if (line == null) break;
-                HandleLine(line);
+
+                try
+                {
+                    HandleLine(line);
+                }
+                catch (Exception ex)
+                {
+                    // A failing subscriber costs this one message; the connection keeps running.
+                    Log.Error("[Listen] Handling a daemon message failed", ex);
+                }
             }
         }
         catch (IOException) { } // Daemon went away: the finally block reports the disconnect
-        catch (ObjectDisposedException) { } // Dispose() closed the pipe underneath us: expected
+        catch (ObjectDisposedException ex)
+        {
+            // Dispose() closes the pipe under the reader; anything else means the pipe died unexpectedly.
+            if (!_disposed)
+                Log.Error("[Listen] Daemon pipe closed unexpectedly", ex);
+        }
         finally
         {
             _connected = false; // Prevent new requests from entering SendRequestAsync
+            outbox.Writer.TryComplete();
             foreach (var id in _pending.Keys)
             {
                 if (_pending.TryRemove(id, out var tcs))
                     tcs.TrySetResult(null);
             }
-            Disconnected?.Invoke();
+
+            try
+            {
+                Disconnected?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[Listen] Disconnect handler failed", ex);
+            }
         }
     }
 
@@ -289,17 +336,13 @@ public sealed class DaemonClient : IDisposable
             : null;
 
     /// <summary>
-    /// Writes one JSON line as raw bytes. Stream.Write avoids StreamWriter.Flush, which blocks on
-    /// synchronous pipes. Writes are serialized with a lock so concurrent requests never interleave.
+    /// Queues a request for the writer task. Never blocks; false when no connection is open.
     /// </summary>
-    private void WriteToPipe(string line)
+    private bool Enqueue(DaemonRequest request)
     {
-        var pipe = _pipe ?? throw new IOException("Not connected to the daemon.");
-        var bytes = Encoding.UTF8.GetBytes(line + "\n");
-        lock (_writeLock)
-        {
-            pipe.Write(bytes, 0, bytes.Length);
-        }
+        request.Id ??= Guid.NewGuid().ToString("N");
+        var outbox = _outbox;
+        return outbox != null && outbox.Writer.TryWrite(JsonSerializer.Serialize(request));
     }
 
     private async Task<DaemonResponse?> SendRequestAsync(DaemonRequest request)
@@ -312,7 +355,8 @@ public sealed class DaemonClient : IDisposable
         _pending[id] = tcs;
         try
         {
-            WriteToPipe(JsonSerializer.Serialize(request));
+            if (!Enqueue(request))
+                return null;
             return await tcs.Task.WaitAsync(RequestTimeout).ConfigureAwait(false);
         }
         catch (TimeoutException)
@@ -351,30 +395,34 @@ public sealed class DaemonClient : IDisposable
         return null;
     }
 
-    public async Task WriteAsync(string paneId, byte[] data)
+    /// <summary>
+    /// Fire-and-forget: queues the input and returns at once. The daemon's reply has no waiter and is
+    /// dropped by the listen loop, so keystrokes never wait on the pipe.
+    /// </summary>
+    public Task WriteAsync(string paneId, byte[] data)
     {
-        await SendRequestAsync(new DaemonRequest
+        Enqueue(new DaemonRequest
         {
             Type = DaemonMessageTypes.SessionWrite,
             PaneId = paneId,
             Data = Convert.ToBase64String(data),
         });
+        return Task.CompletedTask;
     }
 
-    public async Task WriteAsync(string paneId, string text)
-    {
-        await WriteAsync(paneId, Encoding.UTF8.GetBytes(text));
-    }
+    public Task WriteAsync(string paneId, string text) => WriteAsync(paneId, Encoding.UTF8.GetBytes(text));
 
-    public async Task ResizeAsync(string paneId, int cols, int rows)
+    /// <summary>Fire-and-forget, like <see cref="WriteAsync(string, byte[])"/>.</summary>
+    public Task ResizeAsync(string paneId, int cols, int rows)
     {
-        await SendRequestAsync(new DaemonRequest
+        Enqueue(new DaemonRequest
         {
             Type = DaemonMessageTypes.SessionResize,
             PaneId = paneId,
             Cols = cols,
             Rows = rows,
         });
+        return Task.CompletedTask;
     }
 
     public async Task CloseSessionAsync(string paneId)
@@ -434,6 +482,7 @@ public sealed class DaemonClient : IDisposable
         if (_disposed) return;
         _disposed = true;
         _connected = false;
+        _outbox?.Writer.TryComplete();
 
         _listenCts?.Cancel();
         _reader?.Dispose();

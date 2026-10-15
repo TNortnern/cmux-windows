@@ -648,3 +648,33 @@ public class TerminalProcessTests
         session.WorkingDirectory.Should().Be(Environment.SystemDirectory);
     }
 }
+
+public class TerminalSessionReplyTests
+{
+    [Fact]
+    public void DeviceStatusReport_IsWrittenThroughDaemonWriter()
+    {
+        using var session = new TerminalSession("pane");
+        var written = new List<string>();
+        session.DaemonWrite = data =>
+        {
+            written.Add(Encoding.ASCII.GetString(data));
+            return Task.CompletedTask;
+        };
+
+        session.FeedOutput(Encoding.ASCII.GetBytes("\x1b[6n"));
+
+        written.Should().Equal("\x1b[1;1R");
+    }
+
+    [Fact]
+    public void Start_AfterDispose_ThrowsWithoutStartingAShell()
+    {
+        var session = new TerminalSession("pane");
+        session.Dispose();
+
+        var start = () => session.Start("cmd.exe /d /c exit");
+
+        start.Should().Throw<ObjectDisposedException>();
+    }
+}

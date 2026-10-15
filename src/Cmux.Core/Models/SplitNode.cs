@@ -290,10 +290,15 @@ public class SplitNode
         Second?.Equalize();
     }
 
+    // Equalize can leave a ratio well below 0.1 when many panes share one side, so the bounds are wide.
+    private const double MinRatio = 0.02;
+    private const double MaxRatio = 0.98;
+
     /// <summary>
     /// Grows the given pane toward <paramref name="direction"/> by moving the nearest divider
     /// with matching orientation. Right/Down move the pane's trailing divider; Left/Up move its
-    /// leading divider. Returns false when no such divider exists.
+    /// leading divider. Returns false when no divider could move (none exists, or it is already at
+    /// its limit), so an outer divider of the same orientation gets the resize instead.
     /// </summary>
     public bool ResizePane(string paneId, PaneDirection direction, double delta)
     {
@@ -314,18 +319,23 @@ public class SplitNode
         if (Direction != orientation) return false;
 
         if (trailing && inFirst)
-        {
-            SplitRatio = Math.Clamp(SplitRatio + delta, 0.1, 0.9);
-            return true;
-        }
+            return TrySetRatio(SplitRatio + delta);
 
         if (!trailing && inSecond)
-        {
-            SplitRatio = Math.Clamp(SplitRatio - delta, 0.1, 0.9);
-            return true;
-        }
+            return TrySetRatio(SplitRatio - delta);
 
         return false;
+    }
+
+    /// <summary>Applies the clamped ratio. Returns false when it did not change.</summary>
+    private bool TrySetRatio(double ratio)
+    {
+        double clamped = Math.Clamp(ratio, MinRatio, MaxRatio);
+        if (Math.Abs(clamped - SplitRatio) < 1e-9)
+            return false;
+
+        SplitRatio = clamped;
+        return true;
     }
 
     /// <summary>

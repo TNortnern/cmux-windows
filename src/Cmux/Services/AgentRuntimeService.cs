@@ -2072,7 +2072,7 @@ Available tools:
             CreateNoWindow = true,
         };
 
-        if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
+        if (WorkingDirectoryPolicy.IsUsable(workingDirectory))
             psi.WorkingDirectory = workingDirectory;
 
         if (extraEnv is { Count: > 0 })
@@ -2814,7 +2814,7 @@ internal sealed class McpProcessSession : IDisposable
         foreach (var arg in SplitArgs(config.Arguments))
             psi.ArgumentList.Add(arg);
 
-        if (!string.IsNullOrWhiteSpace(config.WorkingDirectory) && Directory.Exists(config.WorkingDirectory))
+        if (WorkingDirectoryPolicy.IsUsable(config.WorkingDirectory))
             psi.WorkingDirectory = config.WorkingDirectory;
 
         _process = new Process { StartInfo = psi };

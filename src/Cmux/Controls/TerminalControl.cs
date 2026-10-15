@@ -48,7 +48,10 @@ public class TerminalControl : FrameworkElement
     private bool _followOutput = true;
     private int _lastScrollbackCount;
     private int _renderQueued;
+    private int _redrawQueued;
     private volatile bool _renderDirty;
+    // Session Redraw subscriber; a field so AttachSession and Detach unsubscribe the same delegate.
+    private readonly Action _sessionRedraw;
     // Snapshot of IsLoaded && IsVisible, maintained on the UI thread. RequestRender runs on the
     // session's read thread, where touching dependency properties throws.
     private volatile bool _isShown;
@@ -131,6 +134,7 @@ public class TerminalControl : FrameworkElement
 
     public TerminalControl()
     {
+        _sessionRedraw = OnSessionRedraw;
         _theme = s_cachedTheme ??= GhosttyConfigReader.ReadConfig();
         _visual = new DrawingVisual();
         AddVisualChild(_visual);
@@ -187,7 +191,7 @@ public class TerminalControl : FrameworkElement
     {
         if (_session != null)
         {
-            _session.Redraw -= OnRedraw;
+            _session.Redraw -= _sessionRedraw;
             _session.BellReceived -= OnBell;
         }
 
@@ -196,7 +200,7 @@ public class TerminalControl : FrameworkElement
         _scrollOffset = 0;
         _followOutput = true;
         _lastScrollbackCount = _session.Buffer.ScrollbackCount;
-        _session.Redraw += OnRedraw;
+        _session.Redraw += _sessionRedraw;
         _session.BellReceived += OnBell;
         CalculateTerminalSize();
         RequestRender(System.Windows.Threading.DispatcherPriority.Render);
@@ -211,7 +215,7 @@ public class TerminalControl : FrameworkElement
     {
         if (_session != null)
         {
-            _session.Redraw -= OnRedraw;
+            _session.Redraw -= _sessionRedraw;
             _session.BellReceived -= OnBell;
             _session = null;
         }
@@ -272,6 +276,26 @@ public class TerminalControl : FrameworkElement
             _cursorVisible = true;
             RequestRender();
         }
+    }
+
+    // Raised on the session's read thread. Bursts are coalesced into one UI-thread OnRedraw, so a flood of
+    // output queues at most one dispatcher item.
+    private void OnSessionRedraw()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            OnRedraw();
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _redrawQueued, 1) == 1)
+            return;
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            Interlocked.Exchange(ref _redrawQueued, 0);
+            OnRedraw();
+        }, System.Windows.Threading.DispatcherPriority.Background);
     }
 
     private void OnRedraw()
@@ -913,12 +937,20 @@ public class TerminalControl : FrameworkElement
         return false;
     }
 
+    /// <summary>Reads the selection under the session lock: the parser writes the buffer on the read thread.</summary>
+    private string ReadSelectedText()
+    {
+        var session = _session!;
+        lock (session.SyncRoot)
+            return _selection.GetSelectedText(session.Buffer, _scrollOffset);
+    }
+
     private bool CopySelectionToClipboard()
     {
         if (_session == null || !_selection.HasSelection)
             return false;
 
-        var text = _selection.GetSelectedText(_session.Buffer, _scrollOffset);
+        var text = ReadSelectedText();
         if (string.IsNullOrEmpty(text))
             return false;
 
@@ -1058,7 +1090,7 @@ public class TerminalControl : FrameworkElement
         {
             if (_selection.HasSelection)
             {
-                var text = _selection.GetSelectedText(_session.Buffer, _scrollOffset);
+                var text = ReadSelectedText();
                 if (!string.IsNullOrEmpty(text))
                     Clipboard.SetText(text);
                 _selection.ClearSelection();
@@ -1397,7 +1429,8 @@ public class TerminalControl : FrameworkElement
 
         if (e.ClickCount == 2 && _session != null)
         {
-            _selection.SelectWord(_session.Buffer, row, col, _scrollOffset);
+            lock (_session.SyncRoot)
+                _selection.SelectWord(_session.Buffer, row, col, _scrollOffset);
         }
         else if (e.ClickCount == 3 && _session != null)
         {
@@ -1430,7 +1463,9 @@ public class TerminalControl : FrameworkElement
             if (row != _lastUrlRow)
             {
                 _lastUrlRow = row;
-                var lineText = UrlDetector.GetRowText(_session.Buffer, row);
+                string lineText;
+                lock (_session.SyncRoot)
+                    lineText = UrlDetector.GetRowText(_session.Buffer, row);
                 _cachedRowUrls = UrlDetector.FindUrls(lineText);
             }
 
@@ -1548,7 +1583,7 @@ public class TerminalControl : FrameworkElement
         {
             if (_session != null)
             {
-                var text = _selection.GetSelectedText(_session.Buffer, _scrollOffset);
+                var text = ReadSelectedText();
                 if (!string.IsNullOrEmpty(text)) Clipboard.SetText(text);
                 _selection.ClearSelection();
             }

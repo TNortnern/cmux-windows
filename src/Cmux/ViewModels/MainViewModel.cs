@@ -49,11 +49,11 @@ public partial class MainViewModel : ObservableObject
     public MainViewModel()
     {
         _notificationService = App.NotificationService;
-        _notificationService.UnreadCountChanged += () =>
+        _notificationService.UnreadCountChanged += () => UiDispatch.Post(() =>
         {
             TotalUnreadCount = _notificationService.UnreadCount;
             UpdateWorkspaceNotificationCounts();
-        };
+        });
 
         // Wire up the named pipe command handler
         if (App.PipeServer != null)
@@ -381,9 +381,10 @@ public partial class MainViewModel : ObservableObject
                 if (!await App.DaemonConnectTask)
                     return;
 
-                var known = await Application.Current.Dispatcher.InvokeAsync(() => CollectAllPaneIds()).Task;
                 var client = App.DaemonClient;
                 var sessions = await client.ListSessionsAsync();
+                // Collected after the listing, so a pane created in the meantime is never closed.
+                var known = await Application.Current.Dispatcher.InvokeAsync(() => CollectAllPaneIds()).Task;
 
                 foreach (var info in sessions.Where(s => !known.Contains(s.PaneId)))
                 {
@@ -854,7 +855,7 @@ public partial class MainViewModel : ObservableObject
         if (args.TryGetValue("maxChars", out var charsRaw) && int.TryParse(charsRaw, out var parsedChars))
             maxChars = Math.Clamp(parsedChars, 512, 200000);
 
-        var allText = session.Buffer.ExportPlainText(maxScrollbackLines: 20000);
+        var allText = session.ExportPlainText(maxScrollbackLines: 20000);
         var tailText = TailLines(allText, lines);
         if (tailText.Length > maxChars)
             tailText = "..." + tailText[^maxChars..];

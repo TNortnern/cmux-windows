@@ -2,6 +2,7 @@ using System.IO.Pipes;
 using System.Text;
 using System.Diagnostics;
 using Cmux.Core.IPC;
+using Cmux.Core.Services;
 using Microsoft.Win32.SafeHandles;
 
 namespace Cmux.Core.Terminal;
@@ -23,6 +24,10 @@ public sealed class TerminalSession : IDisposable
     private volatile bool _daemonWriteLogged;
     private volatile bool _localWriteNullLogged;
     private readonly object _lock = new();
+    // Serializes writes to the ConPTY input pipe; never held together with _lock.
+    private readonly object _writeGate = new();
+    // DSR/DA replies queued by the parser (guarded by _lock), written once the lock is released.
+    private readonly List<byte[]> _pendingReplies = [];
 
     /// <summary>
     /// Lock held while the parser mutates <see cref="Buffer"/>. Readers on other
@@ -172,6 +177,9 @@ public sealed class TerminalSession : IDisposable
 
         lock (_lock)
         {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(TerminalSession));
+
             var console = PseudoConsole.Create((short)Buffer.Cols, (short)Buffer.Rows);
             TerminalProcess process;
             try
@@ -274,9 +282,19 @@ public sealed class TerminalSession : IDisposable
                     }
                 }
 
-                RawOutputReceived?.Invoke(chunk);
-                OutputReceived?.Invoke();
-                Redraw?.Invoke();
+                FlushPendingReplies();
+
+                try
+                {
+                    RawOutputReceived?.Invoke(chunk);
+                    OutputReceived?.Invoke();
+                    Redraw?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    // A subscriber bug must not end the read loop, let alone the process.
+                    Log.Error($"[TerminalSession:{PaneId}] Output subscriber failed", ex);
+                }
             }
         }
         catch (IOException) when (_disposed)
@@ -318,7 +336,8 @@ public sealed class TerminalSession : IDisposable
             return;
         }
 
-        if (_writeStream == null)
+        var stream = _writeStream;
+        if (stream == null)
         {
             if (!_localWriteNullLogged)
             {
@@ -327,15 +346,44 @@ public sealed class TerminalSession : IDisposable
             }
             return;
         }
-        try
+
+        lock (_writeGate)
         {
-            _writeStream.Write(data, 0, data.Length);
-            _writeStream.Flush();
+            try
+            {
+                stream.Write(data, 0, data.Length);
+                stream.Flush();
+            }
+            catch (IOException) when (_disposed)
+            {
+                // Expected during shutdown
+            }
+            catch (ObjectDisposedException)
+            {
+                // Disposed while this write was in flight
+            }
         }
-        catch (IOException) when (_disposed)
+    }
+
+    /// <summary>
+    /// Queues a reply the shell asked for (DSR/DA). Called from the parser, so it only appends to a list;
+    /// <see cref="FlushPendingReplies"/> writes it once <see cref="_lock"/> is released.
+    /// </summary>
+    private void QueueReply(string text) => _pendingReplies.Add(Encoding.UTF8.GetBytes(text));
+
+    private void FlushPendingReplies()
+    {
+        byte[][] replies;
+        lock (_lock)
         {
-            // Expected during shutdown
+            if (_pendingReplies.Count == 0)
+                return;
+            replies = _pendingReplies.ToArray();
+            _pendingReplies.Clear();
         }
+
+        foreach (var reply in replies)
+            Write(reply);
     }
 
     /// <summary>
@@ -382,6 +430,7 @@ public sealed class TerminalSession : IDisposable
             }
         }
 
+        FlushPendingReplies();
         OutputReceived?.Invoke();
         Redraw?.Invoke();
     }
@@ -391,6 +440,15 @@ public sealed class TerminalSession : IDisposable
         lock (_lock)
         {
             return Buffer.CreateSnapshot(maxScrollbackLines);
+        }
+    }
+
+    /// <summary>Plain text of the buffer (scrollback included), read under the parser lock.</summary>
+    public string ExportPlainText(int maxScrollbackLines = 20000)
+    {
+        lock (_lock)
+        {
+            return Buffer.ExportPlainText(maxScrollbackLines);
         }
     }
 
@@ -521,13 +579,13 @@ public sealed class TerminalSession : IDisposable
                 if (Param(0) == 6)
                 {
                     // CPR — Cursor Position Report
-                    Write($"\x1b[{Buffer.CursorRow + 1};{Buffer.CursorCol + 1}R");
+                    QueueReply($"\x1b[{Buffer.CursorRow + 1};{Buffer.CursorCol + 1}R");
                 }
                 break;
 
             case 'c': // DA — Device Attributes
                 if (!isPrivate)
-                    Write("\x1b[?1;0c");
+                    QueueReply("\x1b[?1;0c");
                 break;
         }
     }
@@ -701,8 +759,12 @@ public sealed class TerminalSession : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // Set under the lock so a concurrent Start either finishes first (and is disposed here) or sees _disposed.
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
 
         // Disposing the process kills the shell's job (and the whole tree); the pipes and
         // the pseudo console are released afterwards.

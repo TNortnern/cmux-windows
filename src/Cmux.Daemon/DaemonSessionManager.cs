@@ -68,7 +68,17 @@ public sealed class DaemonSessionManager : IDisposable
         };
 
         _sessions[paneId] = session;
-        session.Start(command: command, workingDirectory: workingDirectory);
+        try
+        {
+            session.Start(command: command, workingDirectory: workingDirectory);
+        }
+        catch
+        {
+            // A session whose shell never started must not stay registered.
+            _sessions.TryRemove(new KeyValuePair<string, TerminalSession>(paneId, session));
+            session.Dispose();
+            throw;
+        }
 
         SessionCreated?.Invoke(paneId);
 

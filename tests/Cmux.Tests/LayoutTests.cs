@@ -104,7 +104,49 @@ public class LayoutTests
 
         root.ResizePane(LeafIds(root)[0], PaneDirection.Right, 10);
 
-        root.SplitRatio.Should().BeApproximately(0.9, 1e-9);
+        root.SplitRatio.Should().BeApproximately(0.98, 1e-9);
+    }
+
+    [Fact]
+    public void ResizePane_SaturatedDivider_ReturnsFalse()
+    {
+        var root = SplitNode.CreateColumns(2);
+        root.SplitRatio = 0.98;
+
+        root.ResizePane(LeafIds(root)[0], PaneDirection.Right, 0.1).Should().BeFalse();
+        root.SplitRatio.Should().BeApproximately(0.98, 1e-9);
+    }
+
+    [Fact]
+    public void ResizePane_InnerDividerAtLimit_FallsThroughToOuterDivider()
+    {
+        var root = SplitNode.CreateColumns(3); // (A | B) | C
+        var ids = LeafIds(root);
+        root.First!.SplitRatio = 0.98;
+
+        root.ResizePane(ids[1], PaneDirection.Right, 0.1).Should().BeTrue();
+
+        root.First!.SplitRatio.Should().BeApproximately(0.98, 1e-9);
+        root.SplitRatio.Should().BeApproximately(2.0 / 3 + 0.1, 1e-9);
+    }
+
+    [Fact]
+    public void Equalize_ManyPanes_RatioBelowOldFloor_StaysResizable()
+    {
+        // One pane beside 29 panes: Equalize gives the single pane 1/30 of the width.
+        var root = new SplitNode
+        {
+            IsLeaf = false,
+            Direction = SplitDirection.Vertical,
+            First = SplitNode.CreateLeaf("A"),
+            Second = SplitNode.CreateColumns(29),
+        };
+
+        root.Equalize();
+        root.SplitRatio.Should().BeApproximately(1.0 / 30, 1e-9);
+
+        root.ResizePane("A", PaneDirection.Right, 0.01).Should().BeTrue();
+        root.SplitRatio.Should().BeApproximately(1.0 / 30 + 0.01, 1e-9);
     }
 
     [Fact]

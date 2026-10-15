@@ -40,6 +40,7 @@ public sealed class TerminalProcess : IDisposable
         }
 
         _jobHandle = CreateKillOnCloseJob();
+        IntPtr waitHandle = IntPtr.Zero;
         try
         {
             // Created suspended so the process is in the job before it can spawn anything.
@@ -50,6 +51,10 @@ public sealed class TerminalProcess : IDisposable
 
             if (ResumeThread(_processInfo.hThread) == uint.MaxValue)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread failed.");
+
+            // The wait thread owns its own handle, so Dispose closing _processInfo.hProcess cannot race it.
+            if (!DuplicateHandle(GetCurrentProcess(), _processInfo.hProcess, GetCurrentProcess(), out waitHandle, 0, false, DUPLICATE_SAME_ACCESS))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "DuplicateHandle failed.");
         }
         catch
         {
@@ -57,8 +62,7 @@ public sealed class TerminalProcess : IDisposable
             throw;
         }
 
-        var processHandle = _processInfo.hProcess;
-        var waitThread = new Thread(() => WaitForExitThread(processHandle))
+        var waitThread = new Thread(() => WaitForExitThread(waitHandle))
         {
             IsBackground = true,
             Name = $"ConPTY-Wait-{_processInfo.dwProcessId}",
@@ -89,12 +93,12 @@ public sealed class TerminalProcess : IDisposable
                 {
                     var fullPath = Path.Combine(dir, "pwsh.exe");
                     if (File.Exists(fullPath))
-                        return fullPath;
+                        return QuoteIfNeeded(fullPath);
                 }
             }
             else if (File.Exists(path))
             {
-                return path;
+                return QuoteIfNeeded(path);
             }
         }
 
@@ -103,15 +107,19 @@ public sealed class TerminalProcess : IDisposable
             Environment.GetFolderPath(Environment.SpecialFolder.System),
             "WindowsPowerShell", "v1.0", "powershell.exe");
         if (File.Exists(winPowerShell))
-            return winPowerShell;
+            return QuoteIfNeeded(winPowerShell);
 
         // Last resort: cmd.exe from COMSPEC
         var comspec = Environment.GetEnvironmentVariable("COMSPEC");
         if (!string.IsNullOrEmpty(comspec) && File.Exists(comspec))
-            return comspec;
+            return QuoteIfNeeded(comspec);
 
         return "cmd.exe";
     }
+
+    /// <summary>Command lines are split at spaces, so an executable path containing spaces must be quoted.</summary>
+    private static string QuoteIfNeeded(string path) =>
+        path.Contains(' ') ? "\"" + path + "\"" : path;
 
     private static IntPtr CreateKillOnCloseJob()
     {
@@ -262,9 +270,16 @@ public sealed class TerminalProcess : IDisposable
         return attributeList;
     }
 
-    private void WaitForExitThread(IntPtr processHandle)
+    private void WaitForExitThread(IntPtr waitHandle)
     {
-        WaitForSingleObject(processHandle, INFINITE);
+        try
+        {
+            WaitForSingleObject(waitHandle, INFINITE);
+        }
+        finally
+        {
+            CloseHandle(waitHandle);
+        }
         Exited?.Invoke();
     }
 

@@ -406,15 +406,23 @@ public partial class MainWindow : Window
         bool shift = modifiers.HasFlag(ModifierKeys.Shift);
         bool alt = modifiers.HasFlag(ModifierKeys.Alt);
 
-        _lastKeyWasShortcut = TryRunShortcut(key, ctrl, shift, alt);
+        // AltGr arrives as Ctrl+Alt with RightAlt held. It types characters (German { [ ] }, French ~ # | \ ...),
+        // so it is never a shortcut, including the Ctrl+Alt chords.
+        bool altGr = ctrl && alt && Keyboard.IsKeyDown(Key.RightAlt);
+
+        _lastKeyWasShortcut = !altGr && TryRunShortcut(key, ctrl, shift, alt);
         if (_lastKeyWasShortcut)
             e.Handled = true;
     }
 
     private void OnPreviewTextInput(object sender, TextCompositionEventArgs e)
     {
-        if (_lastKeyWasShortcut)
-            e.Handled = true;
+        // Only the one TextInput that follows a handled shortcut key press is swallowed.
+        if (!_lastKeyWasShortcut)
+            return;
+
+        _lastKeyWasShortcut = false;
+        e.Handled = true;
     }
 
     private bool TryRunShortcut(Key key, bool ctrl, bool shift, bool alt)
