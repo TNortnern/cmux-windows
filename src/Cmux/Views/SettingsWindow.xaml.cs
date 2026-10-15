@@ -19,6 +19,7 @@ public partial class SettingsWindow : Window
     private bool _clearExaKey;
     private readonly List<AgentCustomToolConfig> _customToolsDraft = [];
     private readonly List<AgentMcpServerConfig> _mcpServersDraft = [];
+    private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
 
     public SettingsWindow(string initialSection = "Appearance")
     {
@@ -89,6 +90,7 @@ public partial class SettingsWindow : Window
         BracketedPasteCheck.IsChecked = s.BracketedPaste;
 
         RestoreSessionCheck.IsChecked = s.RestoreSessionOnStartup;
+        SessionDaemonCheck.IsChecked = s.UseSessionDaemon;
         ConfirmCloseCheck.IsChecked = s.ConfirmOnClose;
         AutoCopyCheck.IsChecked = s.AutoCopyOnSelect;
         CtrlClickUrlCheck.IsChecked = s.CtrlClickOpensUrls;
@@ -128,7 +130,7 @@ public partial class SettingsWindow : Window
         AgentSubmitFallbackWaitMsBox.Text = Math.Clamp(agent.SubmitFallbackWaitMs, 0, 5000).ToString();
         AgentSubmitFallbackOrderBox.Text = string.IsNullOrWhiteSpace(agent.SubmitFallbackOrder) ? "enter,linefeed" : agent.SubmitFallbackOrder;
         AgentEnableSubmitProfilesCheck.IsChecked = agent.EnableTargetSubmitProfiles;
-        AgentSubmitProfilesJsonBox.Text = JsonSerializer.Serialize(agent.SubmitProfiles ?? [], new JsonSerializerOptions { WriteIndented = true });
+        AgentSubmitProfilesJsonBox.Text = JsonSerializer.Serialize(agent.SubmitProfiles ?? [], IndentedJson);
         AgentAutoDiscoverFilesCheck.IsChecked = agent.AutoDiscoverAgentFiles;
         AgentInstructionsPathBox.Text = agent.AgentInstructionsPath ?? "";
         AgentSkillsRootPathBox.Text = agent.SkillsRootPath ?? "";
@@ -150,8 +152,6 @@ public partial class SettingsWindow : Window
         _mcpServersDraft.Clear();
         _mcpServersDraft.AddRange(agent.McpServers ?? []);
 
-        CustomToolsJsonBox.Text = JsonSerializer.Serialize(_customToolsDraft, new JsonSerializerOptions { WriteIndented = true });
-        McpServersJsonBox.Text = JsonSerializer.Serialize(_mcpServersDraft, new JsonSerializerOptions { WriteIndented = true });
 
         CustomToolsModeCombo.SelectedIndex = agent.UseJsonForCustomTools ? 1 : 0;
         McpServersModeCombo.SelectedIndex = agent.UseJsonForMcpServers ? 1 : 0;
@@ -193,11 +193,22 @@ public partial class SettingsWindow : Window
 
         s.DefaultShell = ShellCombo.SelectedValue as string ?? "";
         s.DefaultShellArgs = ShellArgsBox.Text;
-        if (int.TryParse(ScrollbackBox.Text, out int sb)) s.ScrollbackLines = sb;
+        if (!int.TryParse(ScrollbackBox.Text, out int sb)
+            || sb < SettingsService.MinScrollbackLines
+            || sb > SettingsService.MaxScrollbackLines)
+        {
+            MessageBox.Show(
+                $"Scrollback lines must be a whole number from {SettingsService.MinScrollbackLines} to {SettingsService.MaxScrollbackLines:N0}.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+        s.ScrollbackLines = sb;
         s.VisualBell = VisualBellCheck.IsChecked == true;
         s.BracketedPaste = BracketedPasteCheck.IsChecked == true;
 
         s.RestoreSessionOnStartup = RestoreSessionCheck.IsChecked == true;
+        var daemonChanged = s.UseSessionDaemon != (SessionDaemonCheck.IsChecked == true);
+        s.UseSessionDaemon = SessionDaemonCheck.IsChecked == true;
         s.ConfirmOnClose = ConfirmCloseCheck.IsChecked == true;
         s.AutoCopyOnSelect = AutoCopyCheck.IsChecked == true;
         s.CtrlClickOpensUrls = CtrlClickUrlCheck.IsChecked == true;
@@ -253,7 +264,7 @@ public partial class SettingsWindow : Window
             agent.SubmitFallbackWaitMs = Math.Clamp(submitFallbackWaitMs, 0, 5000);
         agent.SubmitFallbackOrder = AgentSubmitFallbackOrderBox.Text?.Trim() ?? "enter,linefeed";
         agent.EnableTargetSubmitProfiles = AgentEnableSubmitProfilesCheck.IsChecked == true;
-        if (!TryParseSubmitProfilesJson(AgentSubmitProfilesJsonBox.Text, out var submitProfiles, out var submitProfilesParseError))
+        if (!TryParseJsonArray<AgentSubmitProfileConfig>(AgentSubmitProfilesJsonBox.Text, "Submit profiles", out var submitProfiles, out var submitProfilesParseError))
         {
             MessageBox.Show(submitProfilesParseError, "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
@@ -290,7 +301,7 @@ public partial class SettingsWindow : Window
 
         if (agent.UseJsonForCustomTools)
         {
-            if (!TryParseCustomToolsJson(CustomToolsJsonBox.Text, out var parsedTools, out var parseError))
+            if (!TryParseJsonArray<AgentCustomToolConfig>(CustomToolsJsonBox.Text, "Custom tools", out var parsedTools, out var parseError))
             {
                 MessageBox.Show(parseError, "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
@@ -318,12 +329,12 @@ public partial class SettingsWindow : Window
             agent.CustomTools = _customToolsDraft
                 .Select(CloneCustomTool)
                 .ToList();
-            CustomToolsJsonBox.Text = JsonSerializer.Serialize(agent.CustomTools, new JsonSerializerOptions { WriteIndented = true });
+            CustomToolsJsonBox.Text = JsonSerializer.Serialize(agent.CustomTools, IndentedJson);
         }
 
         if (agent.UseJsonForMcpServers)
         {
-            if (!TryParseMcpServersJson(McpServersJsonBox.Text, out var parsedServers, out var parseError))
+            if (!TryParseJsonArray<AgentMcpServerConfig>(McpServersJsonBox.Text, "MCP servers", out var parsedServers, out var parseError))
             {
                 MessageBox.Show(parseError, "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
@@ -351,17 +362,31 @@ public partial class SettingsWindow : Window
             agent.McpServers = _mcpServersDraft
                 .Select(CloneMcpServer)
                 .ToList();
-            McpServersJsonBox.Text = JsonSerializer.Serialize(agent.McpServers, new JsonSerializerOptions { WriteIndented = true });
+            McpServersJsonBox.Text = JsonSerializer.Serialize(agent.McpServers, IndentedJson);
         }
 
-        ApplySecretUpdate(OpenAiApiKeyBox, agent.OpenAi.ApiKeySecretName, ref _clearOpenAiKey);
-        ApplySecretUpdate(AnthropicApiKeyBox, agent.Anthropic.ApiKeySecretName, ref _clearAnthropicKey);
-        ApplySecretUpdate(ExaApiKeyBox, agent.Exa.ApiKeySecretName, ref _clearExaKey);
+        // Non-short-circuit '&': every key gets its chance to save, then we fail as a whole.
+        var secretsSaved = ApplySecretUpdate(OpenAiApiKeyBox, agent.OpenAi.ApiKeySecretName, ref _clearOpenAiKey)
+            & ApplySecretUpdate(AnthropicApiKeyBox, agent.Anthropic.ApiKeySecretName, ref _clearAnthropicKey)
+            & ApplySecretUpdate(ExaApiKeyBox, agent.Exa.ApiKeySecretName, ref _clearExaKey);
+        if (!secretsSaved)
+        {
+            MessageBox.Show(
+                "An API key could not be written to the secure store (secrets.json), so your settings were not saved. Details are in cmux.log under %LOCALAPPDATA%\\cmux\\logs.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
+        }
 
         s.Agent = agent;
 
         SettingsService.Save();
         SettingsService.NotifyChanged();
+
+        if (daemonChanged)
+        {
+            MessageBox.Show("The session daemon setting takes effect the next time cmux starts.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
         return true;
     }
 
@@ -420,27 +445,29 @@ public partial class SettingsWindow : Window
         Close();
     }
 
-    private static void ApplySecretUpdate(PasswordBox box, string secretName, ref bool clearFlag)
+    /// <summary>Returns false if the secret could not be written; the caller keeps the box and flag so a retry is possible.</summary>
+    private static bool ApplySecretUpdate(PasswordBox box, string secretName, ref bool clearFlag)
     {
         if (string.IsNullOrWhiteSpace(secretName))
-            return;
+            return true;
 
         if (clearFlag)
         {
-            SecretStoreService.RemoveSecret(secretName);
+            if (!SecretStoreService.RemoveSecret(secretName))
+                return false;
             clearFlag = false;
-            return;
+            return true;
         }
 
         var value = box.Password;
-        if (string.IsNullOrWhiteSpace(value))
-            return;
+        if (string.IsNullOrWhiteSpace(value) || string.Equals(value, SecretMask, StringComparison.Ordinal))
+            return true;
 
-        if (string.Equals(value, SecretMask, StringComparison.Ordinal))
-            return;
+        if (!SecretStoreService.SetSecret(secretName, value))
+            return false;
 
-        SecretStoreService.SetSecret(secretName, value);
         box.Password = SecretMask;
+        return true;
     }
 
     private void ClearOpenAiKey_Click(object sender, RoutedEventArgs e)
@@ -485,16 +512,19 @@ public partial class SettingsWindow : Window
         McpServersJsonPanel.Visibility = jsonMode ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    // The list and its JSON mirror always show the same draft; refresh both together.
     private void RefreshCustomToolsList()
     {
         CustomToolsListBox.ItemsSource = null;
         CustomToolsListBox.ItemsSource = _customToolsDraft;
+        CustomToolsJsonBox.Text = JsonSerializer.Serialize(_customToolsDraft, IndentedJson);
     }
 
     private void RefreshMcpServersList()
     {
         McpServersListBox.ItemsSource = null;
         McpServersListBox.ItemsSource = _mcpServersDraft;
+        McpServersJsonBox.Text = JsonSerializer.Serialize(_mcpServersDraft, IndentedJson);
     }
 
     private void CustomToolsListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -549,7 +579,6 @@ public partial class SettingsWindow : Window
             _customToolsDraft.Add(draft);
 
         RefreshCustomToolsList();
-        CustomToolsJsonBox.Text = JsonSerializer.Serialize(_customToolsDraft, new JsonSerializerOptions { WriteIndented = true });
     }
 
     private void RemoveSelectedCustomTool_Click(object sender, RoutedEventArgs e)
@@ -559,7 +588,6 @@ public partial class SettingsWindow : Window
 
         _customToolsDraft.Remove(selected);
         RefreshCustomToolsList();
-        CustomToolsJsonBox.Text = JsonSerializer.Serialize(_customToolsDraft, new JsonSerializerOptions { WriteIndented = true });
     }
 
     private void AddOrUpdateMcpServer_Click(object sender, RoutedEventArgs e)
@@ -592,7 +620,6 @@ public partial class SettingsWindow : Window
             _mcpServersDraft.Add(draft);
 
         RefreshMcpServersList();
-        McpServersJsonBox.Text = JsonSerializer.Serialize(_mcpServersDraft, new JsonSerializerOptions { WriteIndented = true });
     }
 
     private void RemoveSelectedMcpServer_Click(object sender, RoutedEventArgs e)
@@ -602,7 +629,6 @@ public partial class SettingsWindow : Window
 
         _mcpServersDraft.Remove(selected);
         RefreshMcpServersList();
-        McpServersJsonBox.Text = JsonSerializer.Serialize(_mcpServersDraft, new JsonSerializerOptions { WriteIndented = true });
     }
 
     private static AgentCustomToolConfig CloneCustomTool(AgentCustomToolConfig source)
@@ -628,9 +654,9 @@ public partial class SettingsWindow : Window
         };
     }
 
-    private static bool TryParseCustomToolsJson(string text, out List<AgentCustomToolConfig> tools, out string error)
+    private static bool TryParseJsonArray<T>(string text, string label, out List<T> items, out string error)
     {
-        tools = [];
+        items = [];
         error = "";
         try
         {
@@ -640,68 +666,16 @@ public partial class SettingsWindow : Window
             using var doc = JsonDocument.Parse(text);
             if (doc.RootElement.ValueKind != JsonValueKind.Array)
             {
-                error = "Custom tools JSON must be an array.";
+                error = $"{label} JSON must be an array.";
                 return false;
             }
 
-            tools = JsonSerializer.Deserialize<List<AgentCustomToolConfig>>(text) ?? [];
+            items = JsonSerializer.Deserialize<List<T>>(text) ?? [];
             return true;
         }
         catch (Exception ex)
         {
-            error = $"Invalid custom tools JSON: {ex.Message}";
-            return false;
-        }
-    }
-
-    private static bool TryParseMcpServersJson(string text, out List<AgentMcpServerConfig> servers, out string error)
-    {
-        servers = [];
-        error = "";
-        try
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return true;
-
-            using var doc = JsonDocument.Parse(text);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array)
-            {
-                error = "MCP servers JSON must be an array.";
-                return false;
-            }
-
-            servers = JsonSerializer.Deserialize<List<AgentMcpServerConfig>>(text) ?? [];
-            return true;
-        }
-        catch (Exception ex)
-        {
-            error = $"Invalid MCP servers JSON: {ex.Message}";
-            return false;
-        }
-    }
-
-    private static bool TryParseSubmitProfilesJson(string text, out List<AgentSubmitProfileConfig> profiles, out string error)
-    {
-        profiles = [];
-        error = "";
-        try
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return true;
-
-            using var doc = JsonDocument.Parse(text);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array)
-            {
-                error = "Submit profiles JSON must be an array.";
-                return false;
-            }
-
-            profiles = JsonSerializer.Deserialize<List<AgentSubmitProfileConfig>>(text) ?? [];
-            return true;
-        }
-        catch (Exception ex)
-        {
-            error = $"Invalid submit profiles JSON: {ex.Message}";
+            error = $"Invalid {label} JSON: {ex.Message}";
             return false;
         }
     }

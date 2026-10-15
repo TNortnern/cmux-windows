@@ -5,6 +5,9 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>Cmux.Cli</RootNamespace>
     <AssemblyName>cmux</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>

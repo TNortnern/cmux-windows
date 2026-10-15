@@ -1,3 +1,7 @@
+using System.Runtime.CompilerServices;
+
+[assembly: InternalsVisibleTo("Cmux.Tests")]
+
 namespace Cmux.Core;
 
 /// <summary>
@@ -5,7 +9,10 @@ namespace Cmux.Core;
 /// </summary>
 public static class CmuxPaths
 {
-    public static string DataDirectory => Ensure(Path.Combine(
+    /// <summary>Test hook: redirects every cmux path under this directory.</summary>
+    internal static string? RootOverride { get; set; }
+
+    public static string DataDirectory => Ensure(RootOverride ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux"));
 
     public static string LogsDirectory => Ensure(Path.Combine(DataDirectory, "logs"));

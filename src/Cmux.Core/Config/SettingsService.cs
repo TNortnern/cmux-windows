@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Cmux.Core.Services;
 
 namespace Cmux.Core.Config;
 
@@ -8,11 +9,8 @@ namespace Cmux.Core.Config;
 /// </summary>
 public static class SettingsService
 {
-    private static readonly string SettingsDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux");
-
-    private static readonly string SettingsPath =
-        Path.Combine(SettingsDir, "settings.json");
+    public const int MinScrollbackLines = 100;
+    public const int MaxScrollbackLines = 100_000;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -21,6 +19,8 @@ public static class SettingsService
     };
 
     private static CmuxSettings? _current;
+
+    private static string SettingsPath => Path.Combine(CmuxPaths.DataDirectory, "settings.json");
 
     /// <summary>
     /// The current in-memory settings instance (loaded on first access).
@@ -39,14 +39,18 @@ public static class SettingsService
     {
         try
         {
-            if (!File.Exists(SettingsPath))
+            var path = SettingsPath;
+            if (!File.Exists(path))
                 return new CmuxSettings();
 
-            var json = File.ReadAllText(SettingsPath);
-            return JsonSerializer.Deserialize<CmuxSettings>(json, JsonOptions) ?? new CmuxSettings();
+            var json = File.ReadAllText(path);
+            var settings = JsonSerializer.Deserialize<CmuxSettings>(json, JsonOptions) ?? new CmuxSettings();
+            settings.ScrollbackLines = Math.Clamp(settings.ScrollbackLines, MinScrollbackLines, MaxScrollbackLines);
+            return settings;
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Error("Failed to load settings.json; using defaults", ex);
             return new CmuxSettings();
         }
     }
@@ -60,17 +64,16 @@ public static class SettingsService
 
         try
         {
-            Directory.CreateDirectory(SettingsDir);
-
-            var tmpPath = SettingsPath + ".tmp";
+            var path = SettingsPath;
+            var tmpPath = path + ".tmp";
             var json = JsonSerializer.Serialize(settings, JsonOptions);
             File.WriteAllText(tmpPath, json);
-            File.Move(tmpPath, SettingsPath, overwrite: true);
+            File.Move(tmpPath, path, overwrite: true);
         }
-        catch
+        catch (Exception ex)
         {
-            // Swallow write failures (permission issues, disk full, etc.)
-            // to avoid crashing the application.
+            // Don't crash on write failures (permission issues, disk full, etc.).
+            Log.Error("Failed to save settings.json", ex);
         }
     }
 

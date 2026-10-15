@@ -15,23 +15,6 @@ public class BoolToVisibilityConverter : IValueConverter
         value is Visibility.Visible;
 }
 
-/// <summary>Bool to Brush (parameter: "trueColor,falseColor").</summary>
-public class BoolToBrushConverter : IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        var colors = (parameter as string)?.Split(',');
-        var trueColor = colors?.Length > 0 ? colors[0] : "#FF818CF8";
-        var falseColor = colors?.Length > 1 ? colors[1] : "#FF3B3B4F";
-        
-        var colorStr = value is true ? trueColor : falseColor;
-        return new SolidColorBrush((Color)ColorConverter.ConvertFromString(colorStr));
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
-        throw new NotImplementedException();
-}
-
 /// <summary>Int > 0 to Visibility.</summary>
 public class IntToVisibilityConverter : IValueConverter
 {
