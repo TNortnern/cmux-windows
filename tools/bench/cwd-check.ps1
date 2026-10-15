@@ -29,7 +29,7 @@ $dataDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "cmu
 if (Test-Path $dataDir) { Remove-Item -Recurse -Force $dataDir }
 if ($Daemon) {
     New-Item -ItemType Directory -Force $dataDir | Out-Null
-    '{ "UseSessionDaemon": true }' | Set-Content -Encoding utf8 (Join-Path $dataDir "settings.json")
+    '{ "useSessionDaemon": true }' | Set-Content -Encoding utf8 (Join-Path $dataDir "settings.json")
 }
 
 $p = Start-Process $AppExe -PassThru

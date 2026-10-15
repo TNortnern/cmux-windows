@@ -16,6 +16,8 @@ public static class SettingsService
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        // Hand-edited files often use the C# property names; don't silently ignore them.
+        PropertyNameCaseInsensitive = true,
     };
 
     private static CmuxSettings? _current;

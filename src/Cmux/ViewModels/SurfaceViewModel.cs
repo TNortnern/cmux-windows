@@ -32,7 +32,8 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
     private readonly ConcurrentDictionary<string, string?> _daemonCwd = new();
     private readonly ConcurrentDictionary<string, int> _daemonPids = new();
     private bool _sessionsStarted;
-    private bool _disposed;
+    // Read from the daemon listen thread as well as the UI thread.
+    private volatile bool _disposed;
 
     [ObservableProperty]
     private string _name;
@@ -157,6 +158,7 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
             session.WorkingDirectory = dir;
         UiDispatch.Post(() =>
         {
+            if (_disposed) return;
             if (paneId == FocusedPaneId)
                 WorkingDirectoryChanged?.Invoke(dir);
         });
@@ -188,6 +190,10 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     private void OnDaemonDisconnected()
     {
+        // Closing the app or the surface disconnects the daemon on purpose; there is nothing to fall back to.
+        if (_disposed || System.Windows.Application.Current?.Dispatcher.HasShutdownStarted == true)
+            return;
+
         // Daemon died — fall back all daemon sessions to local ConPTY
         var paneIds = _daemonPanes.Keys.ToList();
         if (paneIds.Count == 0) return;
@@ -436,9 +442,12 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
         try
         {
-            // Never block the UI thread waiting for the daemon. The daemon is opt-in and only
-            // used when it is already connected; otherwise panes run locally.
+            // When the user opted into the daemon, the first panes are created while it is still
+            // starting (usually ~10-100 ms). Wait briefly so they persist too; never wait when the
+            // daemon is off, and fall back to a local pane if it doesn't come up in time.
             var connect = App.DaemonConnectTask;
+            if (App.IsDaemonEnabled && !connect.IsCompleted)
+                connect.Wait(TimeSpan.FromSeconds(3));
             bool daemonReady = connect.IsCompletedSuccessfully && connect.Result;
 
             DaemonLog($"[StartSession:{paneId}] daemonReady={daemonReady}, TaskStatus={connect.Status}");
@@ -592,6 +601,7 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         {
             UiDispatch.Post(() =>
             {
+                if (_disposed) return;
                 if (paneId == FocusedPaneId)
                     WorkingDirectoryChanged?.Invoke(dir);
             });
@@ -602,9 +612,13 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         session.NotificationReceived += (title, subtitle, body) =>
         {
             var source = NotificationSource.Osc9; // Default
-            UiDispatch.Post(() => _notificationService.AddNotification(
-                _workspaceId, Surface.Id, paneId,
-                title, subtitle, body, source));
+            UiDispatch.Post(() =>
+            {
+                if (_disposed) return;
+                _notificationService.AddNotification(
+                    _workspaceId, Surface.Id, paneId,
+                    title, subtitle, body, source);
+            });
         };
 
         session.ShellPromptMarker += (marker, payload) =>

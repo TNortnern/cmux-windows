@@ -6,9 +6,10 @@ using Xunit;
 namespace Cmux.Tests;
 
 /// <summary>
-/// Tests that redirect CmuxPaths.RootOverride live in this one class so xunit runs them sequentially.
+/// Tests that redirect CmuxPaths.RootOverride share the "CmuxPaths" collection so xunit runs them sequentially.
 /// Each test gets its own temp root, removed on dispose.
 /// </summary>
+[Collection("CmuxPaths")]
 public sealed class ServicesTests : IDisposable
 {
     private readonly string _root;
@@ -201,5 +202,32 @@ public sealed class ServicesTests : IDisposable
         var names = AgentDetector.EnumerateDescendants(snapshot, 10).Select(p => p.Name).ToList();
 
         names.Should().BeEquivalentTo(new[] { "node.exe", "claude.exe" });
+    }
+}
+
+[Collection("CmuxPaths")]
+public class SettingsCaseTests
+{
+    [Fact]
+    public void Load_AcceptsPascalCaseKeys()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cmux-settings-" + Guid.NewGuid().ToString("N"));
+        Cmux.Core.CmuxPaths.RootOverride = root;
+        try
+        {
+            Directory.CreateDirectory(Cmux.Core.CmuxPaths.DataDirectory);
+            File.WriteAllText(Path.Combine(Cmux.Core.CmuxPaths.DataDirectory, "settings.json"),
+                "{ \"UseSessionDaemon\": true, \"scrollbackLines\": 2000 }");
+
+            var settings = Cmux.Core.Config.SettingsService.Load();
+
+            Assert.True(settings.UseSessionDaemon);
+            Assert.Equal(2000, settings.ScrollbackLines);
+        }
+        finally
+        {
+            Cmux.Core.CmuxPaths.RootOverride = null;
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
     }
 }

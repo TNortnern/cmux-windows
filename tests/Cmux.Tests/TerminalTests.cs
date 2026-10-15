@@ -1,6 +1,9 @@
+using System.IO.Pipes;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Cmux.Core.Terminal;
+using Microsoft.Win32.SafeHandles;
 using FluentAssertions;
 using Xunit;
 
@@ -652,8 +655,9 @@ public class TerminalProcessTests
 public class TerminalSessionReplyTests
 {
     [Fact]
-    public void DeviceStatusReport_IsWrittenThroughDaemonWriter()
+    public void DaemonMirror_DoesNotAnswerDeviceStatusReport()
     {
+        // The daemon's authoritative session answers the same query; the mirror must stay silent.
         using var session = new TerminalSession("pane");
         var written = new List<string>();
         session.DaemonWrite = data =>
@@ -662,9 +666,31 @@ public class TerminalSessionReplyTests
             return Task.CompletedTask;
         };
 
+        session.FeedOutput(Encoding.ASCII.GetBytes("\x1b[6n\x1b[c"));
+
+        written.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void LocalSession_AnswersDeviceStatusReportOnConPtyInput()
+    {
+        using var session = new TerminalSession("pane");
+        using var pipe = new AnonymousPipeServerStream(PipeDirection.In);
+        using var conPtyInput = new FileStream(
+            new SafeFileHandle(pipe.ClientSafePipeHandle.DangerousGetHandle(), ownsHandle: false),
+            FileAccess.Write,
+            bufferSize: 1);
+
+        // No shell is started here, so the write side is attached directly to a pipe we can read.
+        typeof(TerminalSession)
+            .GetField("_writeStream", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(session, conPtyInput);
+
         session.FeedOutput(Encoding.ASCII.GetBytes("\x1b[6n"));
 
-        written.Should().Equal("\x1b[1;1R");
+        var reply = new byte[6];
+        pipe.ReadExactly(reply);
+        Encoding.ASCII.GetString(reply).Should().Be("\x1b[1;1R");
     }
 
     [Fact]

@@ -21,12 +21,17 @@ public sealed class TerminalProcess : IDisposable
 
     public event Action? Exited;
 
+    /// <param name="onExited">
+    /// Invoked on the wait thread when the process exits. It is attached before that thread starts, so an
+    /// exit that happens right after launch cannot be missed.
+    /// </param>
     public TerminalProcess(
         PseudoConsole console,
         string? command = null,
         string? workingDirectory = null,
         bool shellIntegration = true,
-        IReadOnlyDictionary<string, string>? extraEnvironment = null)
+        IReadOnlyDictionary<string, string>? extraEnvironment = null,
+        Action? onExited = null)
     {
         var commandLine = command ?? DetectShell();
         IReadOnlyDictionary<string, string>? environment = extraEnvironment;
@@ -62,12 +67,22 @@ public sealed class TerminalProcess : IDisposable
             throw;
         }
 
-        var waitThread = new Thread(() => WaitForExitThread(waitHandle))
+        var waitThread = new Thread(() => WaitForExitThread(waitHandle, onExited))
         {
             IsBackground = true,
             Name = $"ConPTY-Wait-{_processInfo.dwProcessId}",
         };
-        waitThread.Start();
+        try
+        {
+            waitThread.Start();
+        }
+        catch
+        {
+            // The wait thread never ran, so nothing else will close its handle.
+            CloseHandle(waitHandle);
+            ReleaseHandles();
+            throw;
+        }
     }
 
     /// <summary>
@@ -270,7 +285,7 @@ public sealed class TerminalProcess : IDisposable
         return attributeList;
     }
 
-    private void WaitForExitThread(IntPtr waitHandle)
+    private void WaitForExitThread(IntPtr waitHandle, Action? onExited)
     {
         try
         {
@@ -280,6 +295,7 @@ public sealed class TerminalProcess : IDisposable
         {
             CloseHandle(waitHandle);
         }
+        onExited?.Invoke();
         Exited?.Invoke();
     }
 

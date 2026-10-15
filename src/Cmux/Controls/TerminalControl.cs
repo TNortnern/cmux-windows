@@ -303,7 +303,9 @@ public class TerminalControl : FrameworkElement
         if (_session == null)
             return;
 
-        var currentScrollback = _session.Buffer.ScrollbackCount;
+        int currentScrollback;
+        lock (_session.SyncRoot)
+            currentScrollback = _session.Buffer.ScrollbackCount;
         var scrollbackDelta = currentScrollback - _lastScrollbackCount;
 
         if (_followOutput || _scrollOffset == 0)

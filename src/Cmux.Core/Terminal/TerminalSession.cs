@@ -184,7 +184,9 @@ public sealed class TerminalSession : IDisposable
             TerminalProcess process;
             try
             {
-                process = new TerminalProcess(console, command, effectiveWorkingDirectory, ShellIntegrationEnabled);
+                // The exit callback is attached in the constructor so a very fast exit cannot be missed.
+                process = new TerminalProcess(console, command, effectiveWorkingDirectory, ShellIntegrationEnabled,
+                    onExited: () => ProcessExited?.Invoke());
             }
             catch
             {
@@ -197,11 +199,6 @@ public sealed class TerminalSession : IDisposable
 
             _readStream = new FileStream(console.ReadPipe, FileAccess.Read);
             _writeStream = new FileStream(console.WritePipe, FileAccess.Write);
-
-            _process.Exited += () =>
-            {
-                ProcessExited?.Invoke();
-            };
 
             _readThread = new Thread(ReadLoop)
             {
@@ -324,15 +321,17 @@ public sealed class TerminalSession : IDisposable
     {
         if (_disposed) return;
 
-        // Daemon mode: forward to daemon instead of local ConPTY
-        if (DaemonWrite != null)
+        // Daemon mode: forward to daemon instead of local ConPTY. Read the delegate once so a
+        // concurrent clear (OnDaemonSessionExited/Disconnected) cannot null it between check and call.
+        var daemonWrite = DaemonWrite;
+        if (daemonWrite != null)
         {
             if (!_daemonWriteLogged)
             {
                 _daemonWriteLogged = true;
                 DaemonClient.LogDaemon($"[TerminalSession:{PaneId}] First DaemonWrite ({data.Length} bytes)");
             }
-            _ = DaemonWrite(data);
+            _ = daemonWrite(data);
             return;
         }
 
@@ -368,20 +367,27 @@ public sealed class TerminalSession : IDisposable
 
     /// <summary>
     /// Queues a reply the shell asked for (DSR/DA). Called from the parser, so it only appends to a list;
-    /// <see cref="FlushPendingReplies"/> writes it once <see cref="_lock"/> is released.
+    /// <see cref="FlushPendingReplies"/> writes it once <see cref="_lock"/> is released. Daemon mirror
+    /// sessions (<see cref="DaemonWrite"/> set) discard it there, since the daemon already answered.
     /// </summary>
     private void QueueReply(string text) => _pendingReplies.Add(Encoding.UTF8.GetBytes(text));
 
     private void FlushPendingReplies()
     {
         byte[][] replies;
+        bool daemonMirror;
         lock (_lock)
         {
             if (_pendingReplies.Count == 0)
                 return;
             replies = _pendingReplies.ToArray();
             _pendingReplies.Clear();
+            // A daemon mirror never answers: the daemon's own session parses the same output and already replied.
+            daemonMirror = DaemonWrite != null;
         }
+
+        if (daemonMirror)
+            return;
 
         foreach (var reply in replies)
             Write(reply);
@@ -401,9 +407,10 @@ public sealed class TerminalSession : IDisposable
         {
             Buffer.Resize(cols, rows);
 
-            // Daemon mode: forward resize to daemon
-            if (DaemonResize != null)
-                _ = DaemonResize(cols, rows);
+            // Daemon mode: forward resize to daemon (delegate read once, see Write)
+            var daemonResize = DaemonResize;
+            if (daemonResize != null)
+                _ = daemonResize(cols, rows);
             else
                 _console?.Resize((short)cols, (short)rows);
         }

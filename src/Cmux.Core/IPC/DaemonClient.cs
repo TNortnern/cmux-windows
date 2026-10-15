@@ -24,7 +24,24 @@ public sealed class DaemonClient : IDisposable
 
     // Outgoing request lines for the current connection. A single writer task drains it, so no caller
     // (including the UI thread) ever blocks on the pipe.
-    private volatile Channel<string>? _outbox;
+    private volatile Outbox? _outbox;
+
+    // A daemon that stops reading would otherwise let queued input grow without bound; past this the connection is dropped.
+    private const int MaxQueuedLines = 10_000;
+
+    /// <summary>Per-connection request queue. <see cref="Depth"/> counts lines queued but not yet written.</summary>
+    private sealed class Outbox
+    {
+        public Outbox(NamedPipeClientStream pipe)
+        {
+            Pipe = pipe;
+            Lines = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+        }
+
+        public NamedPipeClientStream Pipe { get; }
+        public Channel<string> Lines { get; }
+        public int Depth;
+    }
 
     public bool IsConnected => _pipe?.IsConnected == true && _connected;
 
@@ -57,9 +74,9 @@ public sealed class DaemonClient : IDisposable
             _pipe = pipe;
             _reader = reader;
             _connected = true;
-            var outbox = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+            var outbox = new Outbox(pipe);
             _outbox = outbox;
-            StartWriter(pipe, outbox);
+            StartWriter(outbox);
             pipe = null; // now owned by this client
             StartListening(reader, outbox);
             LogDaemon("[Connect] Pipe connected, reader ready.");
@@ -189,23 +206,53 @@ public sealed class DaemonClient : IDisposable
     }
 
     /// <summary>Drains request lines to the pipe, so callers only enqueue and never wait on a write.</summary>
-    private static void StartWriter(NamedPipeClientStream pipe, Channel<string> outbox)
+    private void StartWriter(Outbox outbox)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                await foreach (var line in outbox.Reader.ReadAllAsync())
-                    await pipe.WriteAsync(Encoding.UTF8.GetBytes(line + "\n")).ConfigureAwait(false);
+                await foreach (var line in outbox.Lines.Reader.ReadAllAsync())
+                {
+                    await outbox.Pipe.WriteAsync(Encoding.UTF8.GetBytes(line + "\n")).ConfigureAwait(false);
+                    Interlocked.Decrement(ref outbox.Depth);
+                }
             }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            catch (Exception ex)
             {
-                LogDaemon($"[Write] Pipe writer stopped: {ex.GetType().Name}");
+                // Any write failure ends the connection; the listen loop then reports the disconnect.
+                if (!_disposed)
+                    Log.Error("[Write] Pipe writer failed; closing the daemon connection", ex);
+                Teardown(outbox, ex);
             }
         });
     }
 
-    private void StartListening(StreamReader reader, Channel<string> outbox)
+    /// <summary>
+    /// Ends one connection: no new requests enter it, queued requests are dropped, pending requests get
+    /// null, and closing the pipe makes the listen loop raise <see cref="Disconnected"/>. Idempotent.
+    /// </summary>
+    private void Teardown(Outbox outbox, Exception? cause)
+    {
+        // A stale connection must not mark a newer one as disconnected.
+        if (ReferenceEquals(_outbox, outbox))
+            _connected = false;
+
+        outbox.Lines.Writer.TryComplete(cause);
+        FailPendingRequests();
+        outbox.Pipe.Dispose();
+    }
+
+    private void FailPendingRequests()
+    {
+        foreach (var id in _pending.Keys)
+        {
+            if (_pending.TryRemove(id, out var tcs))
+                tcs.TrySetResult(null);
+        }
+    }
+
+    private void StartListening(StreamReader reader, Outbox outbox)
     {
         _listenCts = new CancellationTokenSource();
         var ct = _listenCts.Token;
@@ -218,7 +265,7 @@ public sealed class DaemonClient : IDisposable
         thread.Start();
     }
 
-    private void ListenLoop(StreamReader reader, Channel<string> outbox, CancellationToken ct)
+    private void ListenLoop(StreamReader reader, Outbox outbox, CancellationToken ct)
     {
         try
         {
@@ -248,20 +295,20 @@ public sealed class DaemonClient : IDisposable
         finally
         {
             _connected = false; // Prevent new requests from entering SendRequestAsync
-            outbox.Writer.TryComplete();
-            foreach (var id in _pending.Keys)
-            {
-                if (_pending.TryRemove(id, out var tcs))
-                    tcs.TrySetResult(null);
-            }
+            outbox.Lines.Writer.TryComplete();
+            FailPendingRequests();
 
-            try
+            // Dispose() ends the connection on purpose; only an unexpected loss is a disconnect.
+            if (!_disposed)
             {
-                Disconnected?.Invoke();
-            }
-            catch (Exception ex)
-            {
-                Log.Error("[Listen] Disconnect handler failed", ex);
+                try
+                {
+                    Disconnected?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("[Listen] Disconnect handler failed", ex);
+                }
             }
         }
     }
@@ -342,7 +389,21 @@ public sealed class DaemonClient : IDisposable
     {
         request.Id ??= Guid.NewGuid().ToString("N");
         var outbox = _outbox;
-        return outbox != null && outbox.Writer.TryWrite(JsonSerializer.Serialize(request));
+        if (outbox == null)
+            return false;
+
+        if (Interlocked.Increment(ref outbox.Depth) > MaxQueuedLines)
+        {
+            Log.Error($"[Write] {MaxQueuedLines} daemon requests queued unwritten; dropping the daemon connection");
+            _ = Task.Run(() => Teardown(outbox, null));
+            return false;
+        }
+
+        if (outbox.Lines.Writer.TryWrite(JsonSerializer.Serialize(request)))
+            return true;
+
+        Interlocked.Decrement(ref outbox.Depth);
+        return false;
     }
 
     private async Task<DaemonResponse?> SendRequestAsync(DaemonRequest request)
@@ -482,17 +543,13 @@ public sealed class DaemonClient : IDisposable
         if (_disposed) return;
         _disposed = true;
         _connected = false;
-        _outbox?.Writer.TryComplete();
+        _outbox?.Lines.Writer.TryComplete();
 
         _listenCts?.Cancel();
         _reader?.Dispose();
         _pipe?.Dispose();
         _listenCts?.Dispose();
 
-        foreach (var id in _pending.Keys)
-        {
-            if (_pending.TryRemove(id, out var tcs))
-                tcs.TrySetResult(null);
-        }
+        FailPendingRequests();
     }
 }

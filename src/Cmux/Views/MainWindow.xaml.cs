@@ -406,9 +406,11 @@ public partial class MainWindow : Window
         bool shift = modifiers.HasFlag(ModifierKeys.Shift);
         bool alt = modifiers.HasFlag(ModifierKeys.Alt);
 
-        // AltGr arrives as Ctrl+Alt with RightAlt held. It types characters (German { [ ] }, French ~ # | \ ...),
-        // so it is never a shortcut, including the Ctrl+Alt chords.
-        bool altGr = ctrl && alt && Keyboard.IsKeyDown(Key.RightAlt);
+        // AltGr arrives as Ctrl+Alt with RightAlt held, and on layouts with an AltGr level it types characters
+        // (German { [ ] }, French ~ # | \ ...). Ctrl+RightAlt+digit on US layouts types nothing and stays a
+        // workspace shortcut, so only a key that the layout turns into printable text counts as AltGr.
+        bool altGr = ctrl && alt && Keyboard.IsKeyDown(Key.RightAlt)
+            && KeyboardLayoutHelper.AltGrProducesText(key);
 
         _lastKeyWasShortcut = !altGr && TryRunShortcut(key, ctrl, shift, alt);
         if (_lastKeyWasShortcut)
