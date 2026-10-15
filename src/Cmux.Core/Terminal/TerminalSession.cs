@@ -24,12 +24,23 @@ public sealed class TerminalSession : IDisposable
     private volatile bool _localWriteNullLogged;
     private readonly object _lock = new();
 
+    private const int MaxCols = 1000;
+    private const int MaxRows = 500;
+
     public TerminalBuffer Buffer { get; }
     public string PaneId { get; }
     public string? Title { get; private set; }
     public string? WorkingDirectory { get; set; }
     public bool IsRunning => _process != null && !_process.HasExited;
     public int? ProcessId => _process?.ProcessId;
+
+    /// <summary>True once the shell has reported its working directory via OSC 7 or OSC 9;9.</summary>
+    public bool HasShellReportedCwd { get; private set; }
+
+    /// <summary>
+    /// When true, shells are started with a prompt hook that reports the cwd (see <see cref="ShellIntegration"/>).
+    /// </summary>
+    public static bool ShellIntegrationEnabled { get; set; } = true;
 
     // Daemon-mode delegates: when set, Write/Resize route through these instead of local ConPTY
     public Func<byte[], Task>? DaemonWrite { get; set; }
@@ -130,6 +141,7 @@ public sealed class TerminalSession : IDisposable
         _oscHandler.WorkingDirectoryChanged += dir =>
         {
             WorkingDirectory = dir;
+            HasShellReportedCwd = true;
             WorkingDirectoryChanged?.Invoke(dir);
         };
 
@@ -149,23 +161,28 @@ public sealed class TerminalSession : IDisposable
     /// </summary>
     public void Start(string? command = null, string? workingDirectory = null)
     {
-        var fallbackDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (string.IsNullOrWhiteSpace(fallbackDirectory))
-            fallbackDirectory = Environment.CurrentDirectory;
-
-        var effectiveWorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
-            ? fallbackDirectory
-            : workingDirectory;
-
+        var effectiveWorkingDirectory = ResolveStartDirectory(workingDirectory);
         WorkingDirectory = effectiveWorkingDirectory;
 
         lock (_lock)
         {
-            _console = PseudoConsole.Create((short)Buffer.Cols, (short)Buffer.Rows);
-            _process = new TerminalProcess(_console, command, effectiveWorkingDirectory);
+            var console = PseudoConsole.Create((short)Buffer.Cols, (short)Buffer.Rows);
+            TerminalProcess process;
+            try
+            {
+                process = new TerminalProcess(console, command, effectiveWorkingDirectory, ShellIntegrationEnabled);
+            }
+            catch
+            {
+                console.Dispose();
+                throw;
+            }
 
-            _readStream = new FileStream(_console.ReadPipe, FileAccess.Read);
-            _writeStream = new FileStream(_console.WritePipe, FileAccess.Write);
+            _console = console;
+            _process = process;
+
+            _readStream = new FileStream(console.ReadPipe, FileAccess.Read);
+            _writeStream = new FileStream(console.WritePipe, FileAccess.Write);
 
             _process.Exited += () =>
             {
@@ -185,10 +202,46 @@ public sealed class TerminalSession : IDisposable
     }
 
     /// <summary>
-    /// Best-known current directory of the shell (shell-integration OSC value,
-    /// then the process's real cwd, then the start directory).
+    /// Uses the requested directory when it is a local, fully-qualified, existing directory;
+    /// otherwise falls back to the user profile.
     /// </summary>
-    public string? GetLiveWorkingDirectory() => WorkingDirectory; // STUB: package B implements
+    private static string ResolveStartDirectory(string? requested)
+    {
+        if (IsUsableLocalDirectory(requested))
+            return requested!;
+
+        var fallback = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(fallback))
+            fallback = Environment.CurrentDirectory;
+        return fallback;
+    }
+
+    private static bool IsUsableLocalDirectory(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+        if (path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
+            return false;
+        if (!Path.IsPathFullyQualified(path))
+            return false;
+        return Directory.Exists(path);
+    }
+
+    /// <summary>
+    /// Best-known current directory of the shell: the last value the shell reported via OSC,
+    /// else the shell process's real cwd (read from its PEB), else the start directory.
+    /// </summary>
+    public string? GetLiveWorkingDirectory()
+    {
+        if (HasShellReportedCwd)
+            return WorkingDirectory;
+
+        var pid = ProcessId;
+        if (pid is int id && ProcessCwdReader.TryGetCurrentDirectory(id, out var cwd) && !string.IsNullOrEmpty(cwd))
+            return cwd;
+
+        return WorkingDirectory;
+    }
 
     private void ReadLoop()
     {
@@ -286,8 +339,8 @@ public sealed class TerminalSession : IDisposable
     {
         if (_disposed) return;
 
-        cols = Math.Max(1, cols);
-        rows = Math.Max(1, rows);
+        cols = Math.Clamp(cols, 1, MaxCols);
+        rows = Math.Clamp(rows, 1, MaxRows);
 
         lock (_lock)
         {
@@ -645,9 +698,11 @@ public sealed class TerminalSession : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        // Disposing the process kills the shell's job (and the whole tree); the pipes and
+        // the pseudo console are released afterwards.
+        _process?.Dispose();
         _readStream?.Dispose();
         _writeStream?.Dispose();
-        _process?.Dispose();
         _console?.Dispose();
     }
 }

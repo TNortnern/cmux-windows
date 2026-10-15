@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace Cmux.Core.Terminal;
 
 [Flags]
@@ -104,12 +106,67 @@ public struct TerminalAttribute
     };
 }
 
+/// <summary>
+/// One grid cell, packed into 12 bytes. Layout:
+///   _meta bits  0-15: character
+///   _meta bits 16-23: CellFlags
+///   _meta bit     24: IsDirty
+///   _meta bits 25-26: Width (0-3)
+///   _fg / _bg:        TerminalColor, bits 0-23 = RGB, bit 24 = IsDefault
+/// default(TerminalCell) decodes to the same values as the former struct.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
 public struct TerminalCell
 {
-    public char Character;
-    public TerminalAttribute Attribute;
-    public bool IsDirty;
-    public int Width; // 1 for normal, 2 for wide chars
+    private const uint DirtyBit = 1u << 24;
+    private const int WidthShift = 25;
+    private const uint WidthMask = 3u << WidthShift;
+    private const uint DefaultColorBit = 1u << 24;
+
+    private uint _meta;
+    private uint _fg;
+    private uint _bg;
+
+    public char Character
+    {
+        readonly get => (char)(_meta & 0xFFFF);
+        set => _meta = (_meta & ~0xFFFFu) | value;
+    }
+
+    public TerminalAttribute Attribute
+    {
+        readonly get => new()
+        {
+            Flags = (CellFlags)((_meta >> 16) & 0xFF),
+            Foreground = DecodeColor(_fg),
+            Background = DecodeColor(_bg),
+        };
+        set
+        {
+            _meta = (_meta & ~(0xFFu << 16)) | (((uint)value.Flags & 0xFF) << 16);
+            _fg = EncodeColor(value.Foreground);
+            _bg = EncodeColor(value.Background);
+        }
+    }
+
+    public bool IsDirty
+    {
+        readonly get => (_meta & DirtyBit) != 0;
+        set => _meta = value ? _meta | DirtyBit : _meta & ~DirtyBit;
+    }
+
+    public int Width // 1 for normal, 2 for wide chars
+    {
+        readonly get => (int)((_meta & WidthMask) >> WidthShift);
+        set => _meta = (_meta & ~WidthMask) | (((uint)value & 3u) << WidthShift);
+    }
+
+    /// <summary>True when the cell is the default blank: ' ' with default attributes.</summary>
+    internal readonly bool IsBlank =>
+        (_meta & 0xFFFF) == ' ' &&
+        ((_meta >> 16) & 0xFF) == 0 &&
+        _fg == DefaultColorBit &&
+        _bg == DefaultColorBit;
 
     public static TerminalCell Empty => new()
     {
@@ -118,4 +175,12 @@ public struct TerminalCell
         IsDirty = true,
         Width = 1,
     };
+
+    private static uint EncodeColor(TerminalColor c) =>
+        c.IsDefault ? DefaultColorBit : ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
+    private static TerminalColor DecodeColor(uint v) =>
+        (v & DefaultColorBit) != 0
+            ? TerminalColor.Default
+            : new TerminalColor((byte)(v >> 16), (byte)(v >> 8), (byte)v);
 }

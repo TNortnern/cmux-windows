@@ -1,60 +1,69 @@
+using System.Collections;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 using static Cmux.Core.Terminal.ConPtyInterop;
 
 namespace Cmux.Core.Terminal;
 
 /// <summary>
-/// Manages a shell process attached to a ConPTY pseudo console.
+/// Manages a shell process attached to a ConPTY pseudo console. The process is placed in a
+/// Job Object with kill-on-close, so disposing this instance terminates the whole process tree.
 /// </summary>
 public sealed class TerminalProcess : IDisposable
 {
-    private readonly PROCESS_INFORMATION _processInfo;
-    private IntPtr _attributeList;
+    private PROCESS_INFORMATION _processInfo;
+    private IntPtr _jobHandle;
     private bool _disposed;
-    private readonly Thread _waitThread;
 
     public int ProcessId => _processInfo.dwProcessId;
     public IntPtr ProcessHandle => _processInfo.hProcess;
 
     public event Action? Exited;
 
-    public TerminalProcess(PseudoConsole console, string? command = null, string? workingDirectory = null)
+    public TerminalProcess(
+        PseudoConsole console,
+        string? command = null,
+        string? workingDirectory = null,
+        bool shellIntegration = true,
+        IReadOnlyDictionary<string, string>? extraEnvironment = null)
     {
-        var shellCommand = command ?? DetectShell();
+        var commandLine = command ?? DetectShell();
+        IReadOnlyDictionary<string, string>? environment = extraEnvironment;
 
-        // Initialize thread attribute list for ConPTY
-        _attributeList = CreateAttributeList(console.Handle);
-
-        // Create process with ConPTY
-        var startupInfo = new STARTUPINFOEX
+        if (shellIntegration)
         {
-            lpAttributeList = _attributeList,
-        };
-        startupInfo.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
+            var applied = ShellIntegration.Apply(commandLine);
+            commandLine = applied.CommandLine;
+            if (applied.ExtraEnv is { Count: > 0 })
+                environment = MergeEnvironment(environment, applied.ExtraEnv);
+        }
 
-        bool success = CreateProcess(
-            null,
-            shellCommand,
-            IntPtr.Zero,
-            IntPtr.Zero,
-            false,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-            IntPtr.Zero,
-            workingDirectory,
-            ref startupInfo,
-            out _processInfo);
+        _jobHandle = CreateKillOnCloseJob();
+        try
+        {
+            // Created suspended so the process is in the job before it can spawn anything.
+            _processInfo = CreateConPtyProcess(console.Handle, commandLine, workingDirectory, environment);
 
-        if (!success)
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to create process with ConPTY.");
+            if (!AssignProcessToJobObject(_jobHandle, _processInfo.hProcess))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject failed.");
 
-        // Start a background thread to wait for process exit
-        _waitThread = new Thread(WaitForExitThread)
+            if (ResumeThread(_processInfo.hThread) == uint.MaxValue)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread failed.");
+        }
+        catch
+        {
+            ReleaseHandles();
+            throw;
+        }
+
+        var processHandle = _processInfo.hProcess;
+        var waitThread = new Thread(() => WaitForExitThread(processHandle))
         {
             IsBackground = true,
             Name = $"ConPTY-Wait-{_processInfo.dwProcessId}",
         };
-        _waitThread.Start();
+        waitThread.Start();
     }
 
     /// <summary>
@@ -104,6 +113,122 @@ public sealed class TerminalProcess : IDisposable
         return "cmd.exe";
     }
 
+    private static IntPtr CreateKillOnCloseJob()
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject failed.");
+
+        var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info,
+            (uint)Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()))
+        {
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new Win32Exception(error, "SetInformationJobObject failed.");
+        }
+
+        return job;
+    }
+
+    private static PROCESS_INFORMATION CreateConPtyProcess(
+        IntPtr conPtyHandle,
+        string commandLine,
+        string? workingDirectory,
+        IReadOnlyDictionary<string, string>? environment)
+    {
+        IntPtr attributeList = CreateAttributeList(conPtyHandle);
+        IntPtr environmentBlock = environment is { Count: > 0 }
+            ? BuildEnvironmentBlock(environment)
+            : IntPtr.Zero;
+
+        try
+        {
+            var startupInfo = new STARTUPINFOEX
+            {
+                lpAttributeList = attributeList,
+            };
+            startupInfo.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
+
+            // CreateProcessW may write into the command line buffer, so it must be mutable.
+            var mutableCommandLine = new StringBuilder(commandLine, commandLine.Length + 1);
+
+            bool success = CreateProcess(
+                null,
+                mutableCommandLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                false,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                environmentBlock,
+                workingDirectory,
+                ref startupInfo,
+                out var processInfo);
+
+            if (!success)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to create process with ConPTY.");
+
+            return processInfo;
+        }
+        finally
+        {
+            DeleteProcThreadAttributeList(attributeList);
+            Marshal.FreeHGlobal(attributeList);
+
+            if (environmentBlock != IntPtr.Zero)
+                Marshal.FreeHGlobal(environmentBlock);
+        }
+    }
+
+    private static Dictionary<string, string> MergeEnvironment(
+        IReadOnlyDictionary<string, string>? a,
+        IReadOnlyDictionary<string, string> b)
+    {
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (a != null)
+            foreach (var kv in a)
+                merged[kv.Key] = kv.Value;
+        foreach (var kv in b)
+            merged[kv.Key] = kv.Value;
+        return merged;
+    }
+
+    /// <summary>
+    /// Builds a Unicode environment block: the current environment with the overrides applied,
+    /// sorted case-insensitively by name and terminated by a double null.
+    /// The caller frees the returned pointer.
+    /// </summary>
+    private static IntPtr BuildEnvironmentBlock(IReadOnlyDictionary<string, string> overrides)
+    {
+        var merged = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            var key = (string)entry.Key;
+            if (key.Length == 0 || key[0] == '=')
+                continue; // hidden per-drive cwd entries
+            merged[key] = (string?)entry.Value ?? string.Empty;
+        }
+
+        foreach (var (key, value) in overrides)
+        {
+            if (key.Length == 0 || key.Contains('='))
+                continue;
+            merged[key] = value;
+        }
+
+        var block = new StringBuilder();
+        foreach (var (key, value) in merged)
+            block.Append(key).Append('=').Append(value).Append('\0');
+        if (block.Length == 0)
+            block.Append('\0');
+
+        // StringToHGlobalUni appends one more null, producing the required double-null end.
+        return Marshal.StringToHGlobalUni(block.ToString());
+    }
+
     private static IntPtr CreateAttributeList(IntPtr conPtyHandle)
     {
         // Query the required size
@@ -114,8 +239,9 @@ public sealed class TerminalProcess : IDisposable
 
         if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref size))
         {
+            int error = Marshal.GetLastWin32Error();
             Marshal.FreeHGlobal(attributeList);
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "InitializeProcThreadAttributeList failed.");
+            throw new Win32Exception(error, "InitializeProcThreadAttributeList failed.");
         }
 
         if (!UpdateProcThreadAttribute(
@@ -127,23 +253,25 @@ public sealed class TerminalProcess : IDisposable
             IntPtr.Zero,
             IntPtr.Zero))
         {
+            int error = Marshal.GetLastWin32Error();
             DeleteProcThreadAttributeList(attributeList);
             Marshal.FreeHGlobal(attributeList);
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "UpdateProcThreadAttribute failed.");
+            throw new Win32Exception(error, "UpdateProcThreadAttribute failed.");
         }
 
         return attributeList;
     }
 
-    private void WaitForExitThread()
+    private void WaitForExitThread(IntPtr processHandle)
     {
-        WaitForSingleObject(_processInfo.hProcess, INFINITE);
+        WaitForSingleObject(processHandle, INFINITE);
         Exited?.Invoke();
     }
 
     public void WaitForExit()
     {
-        WaitForSingleObject(_processInfo.hProcess, INFINITE);
+        if (_processInfo.hProcess != IntPtr.Zero)
+            WaitForSingleObject(_processInfo.hProcess, INFINITE);
     }
 
     public bool HasExited
@@ -156,12 +284,21 @@ public sealed class TerminalProcess : IDisposable
         }
     }
 
+    /// <summary>
+    /// Terminates the shell and every process in its job.
+    /// </summary>
     public void Kill()
     {
-        if (!_disposed && !HasExited)
-        {
+        if (_disposed) return;
+        KillCore();
+    }
+
+    private void KillCore()
+    {
+        if (_jobHandle != IntPtr.Zero)
+            TerminateJobObject(_jobHandle, 1);
+        else if (_processInfo.hProcess != IntPtr.Zero && !HasExited)
             TerminateProcess(_processInfo.hProcess, 1);
-        }
     }
 
     public void Dispose()
@@ -169,18 +306,25 @@ public sealed class TerminalProcess : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        Kill();
+        ReleaseHandles();
+    }
 
-        if (_processInfo.hProcess != IntPtr.Zero)
-            CloseHandle(_processInfo.hProcess);
+    private void ReleaseHandles()
+    {
+        KillCore();
+
+        // Closing the last handle to a kill-on-close job terminates any remaining processes.
+        if (_jobHandle != IntPtr.Zero)
+        {
+            CloseHandle(_jobHandle);
+            _jobHandle = IntPtr.Zero;
+        }
+
         if (_processInfo.hThread != IntPtr.Zero)
             CloseHandle(_processInfo.hThread);
+        if (_processInfo.hProcess != IntPtr.Zero)
+            CloseHandle(_processInfo.hProcess);
 
-        if (_attributeList != IntPtr.Zero)
-        {
-            DeleteProcThreadAttributeList(_attributeList);
-            Marshal.FreeHGlobal(_attributeList);
-            _attributeList = IntPtr.Zero;
-        }
+        _processInfo = default;
     }
 }

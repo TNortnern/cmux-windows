@@ -30,6 +30,11 @@ public class VtParser
         SosPmApc,
     }
 
+    // OSC payloads longer than this are truncated (excess ignored).
+    private const int MaxOscLength = 64 * 1024;
+    // Builders larger than this are shrunk after use so one big sequence doesn't pin memory.
+    private const int BuilderRetainCapacity = 4 * 1024;
+
     private State _state = State.Ground;
     private readonly StringBuilder _params = new();
     private readonly StringBuilder _intermediates = new();
@@ -109,7 +114,9 @@ public class VtParser
         // Anywhere transitions (apply in any state)
         switch (b)
         {
-            case 0x1B: // ESC
+            case 0x1B: // ESC — inside an OSC this is the start of ST (ESC \), so dispatch first
+                if (_state == State.OscString)
+                    DispatchOsc();
                 _state = State.Escape;
                 _intermediates.Clear();
                 _params.Clear();
@@ -199,7 +206,7 @@ public class VtParser
         if (b == (byte)']')
         {
             _state = State.OscString;
-            _oscString.Clear();
+            ClearBuilder(_oscString);
             return;
         }
 
@@ -349,31 +356,35 @@ public class VtParser
     {
         if (b == 0x07) // BEL terminates OSC
         {
-            OnOscDispatch?.Invoke(_oscString.ToString());
+            DispatchOsc();
             _state = State.Ground;
             return;
         }
 
         if (b == 0x9C) // ST (8-bit)
         {
-            OnOscDispatch?.Invoke(_oscString.ToString());
+            DispatchOsc();
             _state = State.Ground;
             return;
         }
 
-        if (b == 0x1B) // Possible ST (ESC \)
-        {
-            // Will be handled on next byte — peek ahead not needed,
-            // the ESC handler will fire. But we need to dispatch first.
-            OnOscDispatch?.Invoke(_oscString.ToString());
-            _state = State.Escape;
-            return;
-        }
-
-        if (b >= 0x20 || b == 0x09) // Printable or tab
+        if ((b >= 0x20 || b == 0x09) && _oscString.Length < MaxOscLength) // Printable or tab
         {
             _oscString.Append((char)b);
         }
+    }
+
+    private void DispatchOsc()
+    {
+        OnOscDispatch?.Invoke(_oscString.ToString());
+        ClearBuilder(_oscString);
+    }
+
+    private static void ClearBuilder(StringBuilder sb)
+    {
+        sb.Clear();
+        if (sb.Capacity > BuilderRetainCapacity)
+            sb.Capacity = BuilderRetainCapacity;
     }
 
     private void ProcessDcs(byte b)
@@ -425,9 +436,9 @@ public class VtParser
     public void Reset()
     {
         _state = State.Ground;
-        _params.Clear();
-        _intermediates.Clear();
-        _oscString.Clear();
+        ClearBuilder(_params);
+        ClearBuilder(_intermediates);
+        ClearBuilder(_oscString);
         _csiParams.Clear();
         _collectChar = 0;
         _utf8Remaining = 0;
