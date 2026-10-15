@@ -24,6 +24,12 @@ public sealed class TerminalSession : IDisposable
     private volatile bool _localWriteNullLogged;
     private readonly object _lock = new();
 
+    /// <summary>
+    /// Lock held while the parser mutates <see cref="Buffer"/>. Readers on other
+    /// threads (the renderer) take it to avoid observing half-updated rows.
+    /// </summary>
+    public object SyncRoot => _lock;
+
     private const int MaxCols = 1000;
     private const int MaxRows = 500;
 

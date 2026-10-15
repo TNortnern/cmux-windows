@@ -496,6 +496,9 @@ public class TerminalControl : FrameworkElement
 
         _renderDirty = false;
 
+        // Hold the session lock so the parser thread can't mutate rows mid-frame.
+        // Safe from deadlock: the parser raises Redraw only after releasing it.
+        lock (_session.SyncRoot)
         try
         {
             var buffer = _session.Buffer;
