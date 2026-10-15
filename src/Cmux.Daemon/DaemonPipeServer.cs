@@ -4,22 +4,27 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using Cmux.Core.IPC;
-using static Cmux.Core.IPC.DaemonClient;
+using Cmux.Core.Services;
 
 namespace Cmux.Daemon;
 
 public sealed class DaemonPipeServer
 {
     private const string PipeName = "cmux-daemon";
+    private const int OutboxCapacity = 4096;
+    private const int MaxRequestChars = 16 * 1024 * 1024;
+    private const int ReadBufferBytes = 65536;
+
     private readonly DaemonSessionManager _sessionManager;
-    // Each client gets a channel for thread-safe event delivery
-    private readonly ConcurrentDictionary<string, Channel<string>> _clientChannels = new();
+    private readonly ConcurrentDictionary<string, ClientConnection> _clients = new();
     private int _connectedClients;
 
     public int ConnectedClients => _connectedClients;
 
     public event Action? ClientConnected;
     public event Action? ClientDisconnected;
+
+    private sealed record ClientConnection(string Id, Channel<string> Outbox, NamedPipeServerStream Pipe);
 
     public DaemonPipeServer(DaemonSessionManager sessionManager)
     {
@@ -48,58 +53,56 @@ public sealed class DaemonPipeServer
 
     public void Run(CancellationToken ct)
     {
-        LogDaemon($"[PipeServer] Listening on \\\\.\\pipe\\{PipeName}");
+        Log.Info($"[PipeServer] Listening on \\\\.\\pipe\\{PipeName}");
 
         while (!ct.IsCancellationRequested)
         {
+            NamedPipeServerStream? pipe = null;
             try
             {
-                // Use PipeOptions.Asynchronous (overlapped I/O) so reads and writes
-                // can proceed concurrently. With PipeOptions.None Windows serializes
-                // all I/O on the same handle, causing deadlocks when the reader thread
-                // blocks the writer thread (or vice-versa).
-                var pipe = new NamedPipeServerStream(
-                    PipeName,
-                    PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
-
-                LogDaemon("[PipeServer] Waiting for client connection...");
+                // Per-user ACL + CurrentUserOnly; overlapped I/O so reads and writes proceed concurrently.
+                pipe = PipeSecurityFactory.CreateServer(PipeName);
                 pipe.WaitForConnection();
-                LogDaemon("[PipeServer] Client connected, spawning handler...");
 
-                var thread = new Thread(() => HandleConnection(pipe, ct))
+                // Ownership of the stream moves to the connection thread.
+                var connected = pipe;
+                pipe = null;
+                var thread = new Thread(() => HandleConnection(connected))
                 {
                     IsBackground = true,
-                    Name = $"PipeServer-Client",
+                    Name = "PipeServer-Client",
                 };
                 thread.Start();
             }
             catch (OperationCanceledException)
             {
+                pipe?.Dispose();
                 break;
             }
-            catch (IOException ex)
+            catch (Exception ex)
             {
-                LogDaemon($"[PipeServer] Pipe error: {ex.Message}");
+                pipe?.Dispose();
+                Log.Error("[PipeServer] Accept failed, retrying", ex);
                 Thread.Sleep(100);
             }
         }
     }
 
-    private void HandleConnection(NamedPipeServerStream pipe, CancellationToken ct)
+    private void HandleConnection(NamedPipeServerStream pipe)
     {
         var clientId = Guid.NewGuid().ToString("N")[..8];
-        // Single channel for ALL writes (events + responses) — guarantees serial writes to pipe
-        var writeChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+        // Bounded outbox: a client that falls 4096 messages behind is disconnected rather than
+        // letting the daemon buffer without limit.
+        var outbox = Channel.CreateBounded<string>(new BoundedChannelOptions(OutboxCapacity)
         {
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false,
         });
+        var client = new ClientConnection(clientId, outbox, pipe);
 
+        _clients[clientId] = client;
         Interlocked.Increment(ref _connectedClients);
-        _clientChannels[clientId] = writeChannel;
         ClientConnected?.Invoke();
         LogDaemon($"[PipeServer] Client {clientId} connected (total: {_connectedClients}).");
 
@@ -107,101 +110,131 @@ public sealed class DaemonPipeServer
         {
             using (pipe)
             {
-                // Writer thread: drains channel and writes raw bytes to pipe.
-                var writerThread = new Thread(() =>
-                {
-                    try
-                    {
-                        foreach (var json in writeChannel.Reader.ReadAllAsync(ct).ToBlockingEnumerable(ct))
-                        {
-                            var bytes = Encoding.UTF8.GetBytes(json + "\n");
-                            pipe.Write(bytes, 0, bytes.Length);
-                        }
-                    }
-                    catch (IOException) { }
-                    catch (OperationCanceledException) { }
-                    catch (ObjectDisposedException) { }
-                })
+                var writerThread = new Thread(() => WriteLoop(pipe, outbox.Reader))
                 {
                     IsBackground = true,
                     Name = $"PipeServer-Writer-{clientId}",
                 };
                 writerThread.Start();
 
-                LogDaemon($"[PipeServer:{clientId}] Entering read loop (IsConnected={pipe.IsConnected})...");
+                ReadLoop(client);
 
-                // Read raw bytes from pipe and parse lines manually.
-                // Bypasses StreamReader which has issues reading from named pipes.
-                var readBuffer = new byte[65536];
-                var lineBuffer = new StringBuilder();
-
-                while (!ct.IsCancellationRequested && pipe.IsConnected)
-                {
-                    int bytesRead;
-                    try
-                    {
-                        bytesRead = pipe.Read(readBuffer, 0, readBuffer.Length);
-                    }
-                    catch (IOException)
-                    {
-                        break;
-                    }
-
-                    if (bytesRead == 0)
-                    {
-                        LogDaemon($"[PipeServer:{clientId}] Read returned 0 (EOF)");
-                        break;
-                    }
-
-                    lineBuffer.Append(Encoding.UTF8.GetString(readBuffer, 0, bytesRead));
-
-                    // Extract complete lines
-                    var accumulated = lineBuffer.ToString();
-                    int newlineIndex;
-                    while ((newlineIndex = accumulated.IndexOf('\n')) >= 0)
-                    {
-                        var line = accumulated[..newlineIndex];
-                        accumulated = accumulated[(newlineIndex + 1)..];
-
-                        if (line.Length > 0)
-                        {
-                            var response = ProcessRequest(line);
-                            writeChannel.Writer.TryWrite(response);
-                        }
-                    }
-                    lineBuffer.Clear();
-                    lineBuffer.Append(accumulated);
-                }
-
-                writeChannel.Writer.TryComplete();
+                outbox.Writer.TryComplete();
                 writerThread.Join(TimeSpan.FromSeconds(5));
             }
         }
         catch (IOException) { }
-        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
         finally
         {
-            writeChannel.Writer.TryComplete();
-            _clientChannels.TryRemove(clientId, out _);
+            outbox.Writer.TryComplete();
+            _clients.TryRemove(clientId, out _);
             Interlocked.Decrement(ref _connectedClients);
             ClientDisconnected?.Invoke();
             LogDaemon($"[PipeServer] Client {clientId} disconnected (remaining: {_connectedClients}, sessions: {_sessionManager.ActiveSessionCount}).");
         }
     }
 
-    private string ProcessRequest(string requestJson)
+    /// <summary>Drains the outbox to the pipe. Exits when the outbox completes or the pipe breaks.</summary>
+    private static void WriteLoop(NamedPipeServerStream pipe, ChannelReader<string> reader)
     {
         try
         {
-            var request = JsonSerializer.Deserialize<DaemonRequest>(requestJson);
-            if (request == null)
-                return JsonSerializer.Serialize(new DaemonResponse { Success = false, Error = "Invalid request" });
+            foreach (var json in reader.ReadAllAsync().ToBlockingEnumerable())
+            {
+                var bytes = Encoding.UTF8.GetBytes(json + "\n");
+                pipe.Write(bytes, 0, bytes.Length);
+            }
+        }
+        catch (IOException) { } // Client vanished mid-write: the read side handles cleanup
+        catch (ObjectDisposedException) { } // Pipe disposed by disconnect: expected
+    }
 
-            // Log non-write requests (writes are too frequent)
-            if (request.Type != DaemonMessageTypes.SessionWrite)
-                LogDaemon($"[PipeServer] Request: {request.Type} pane={request.PaneId}");
+    /// <summary>
+    /// Reads raw bytes, decodes UTF-8 incrementally (a multi-byte character split across reads is
+    /// preserved by the Decoder), and splits on '\n'. A request line over 16 MB drops the client.
+    /// </summary>
+    private void ReadLoop(ClientConnection client)
+    {
+        var bytes = new byte[ReadBufferBytes];
+        // Decoder may emit up to the byte count plus up to 3 bytes carried over from the previous read.
+        var chars = new char[bytes.Length + 4];
+        var decoder = Encoding.UTF8.GetDecoder();
+        var line = new StringBuilder();
 
-            return request.Type switch
+        while (true)
+        {
+            int read;
+            try
+            {
+                read = client.Pipe.Read(bytes, 0, bytes.Length);
+            }
+            catch (IOException) { return; } // Client disconnected
+            catch (ObjectDisposedException) { return; } // Disconnected from another thread (slow client)
+
+            if (read == 0)
+            {
+                LogDaemon($"[PipeServer:{client.Id}] EOF");
+                return;
+            }
+
+            int charCount = decoder.GetChars(bytes, 0, read, chars, 0, flush: false);
+            Span<char> rest = chars.AsSpan(0, charCount);
+
+            while (true)
+            {
+                int newline = rest.IndexOf('\n');
+                var segment = newline < 0 ? rest : rest[..newline];
+
+                if (line.Length + segment.Length > MaxRequestChars)
+                {
+                    Log.Info($"[PipeServer:{client.Id}] Request exceeded 16 MB; disconnecting client.");
+                    return;
+                }
+                line.Append(segment);
+
+                if (newline < 0) break;
+                rest = rest[(newline + 1)..];
+
+                int length = line.Length;
+                if (length > 0 && line[length - 1] == '\r') length--;
+                if (length > 0)
+                {
+                    var response = ProcessRequest(line.ToString(0, length));
+                    if (!client.Outbox.Writer.TryWrite(response))
+                    {
+                        DisconnectSlowClient(client);
+                        return;
+                    }
+                }
+                line.Clear();
+            }
+        }
+    }
+
+    private string ProcessRequest(string requestJson)
+    {
+        DaemonRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<DaemonRequest>(requestJson);
+        }
+        catch (JsonException)
+        {
+            return Serialize(Fail("Malformed request"));
+        }
+
+        if (request == null)
+            return Serialize(Fail("Invalid request"));
+
+        // Writes are too frequent to log; request bodies are never logged
+        if (request.Type != DaemonMessageTypes.SessionWrite)
+            LogDaemon($"[PipeServer] Request: {request.Type} pane={request.PaneId}");
+
+        DaemonResponse response;
+        try
+        {
+            response = request.Type switch
             {
                 DaemonMessageTypes.SessionCreate => HandleSessionCreate(request),
                 DaemonMessageTypes.SessionWrite => HandleSessionWrite(request),
@@ -209,71 +242,109 @@ public sealed class DaemonPipeServer
                 DaemonMessageTypes.SessionClose => HandleSessionClose(request),
                 DaemonMessageTypes.SessionList => HandleSessionList(),
                 DaemonMessageTypes.SessionSnapshot => HandleSessionSnapshot(request),
-                DaemonMessageTypes.Ping => JsonSerializer.Serialize(new DaemonResponse { Success = true, Data = "pong" }),
-                _ => JsonSerializer.Serialize(new DaemonResponse { Success = false, Error = $"Unknown command: {request.Type}" }),
+                DaemonMessageTypes.SessionCwd => HandleSessionCwd(request),
+                DaemonMessageTypes.Ping => Ok("pong"),
+                _ => Fail($"Unknown command: {request.Type}"),
             };
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new DaemonResponse { Success = false, Error = ex.Message });
+            response = Fail(ex.Message);
         }
+
+        // Echo the correlation Id so the client can match this response to its request
+        response.Id = request.Id;
+        return Serialize(response);
     }
 
-    private string HandleSessionCreate(DaemonRequest request)
+    private DaemonResponse HandleSessionCreate(DaemonRequest request)
     {
-        var paneId = request.PaneId ?? throw new ArgumentException("PaneId required");
+        var paneId = RequirePaneId(request);
+
+        // Never echo the command line into the error or logs
+        if (!DaemonInputValidation.IsCommandAllowed(request.Command))
+            return Fail("Command program is not an allowed executable.");
 
         var info = _sessionManager.CreateSession(
             paneId,
-            request.Cols ?? 120,
-            request.Rows ?? 30,
-            request.WorkingDirectory,
-            request.Command);
+            DaemonInputValidation.ClampCols(request.Cols ?? 120),
+            DaemonInputValidation.ClampRows(request.Rows ?? 30),
+            DaemonInputValidation.ValidateWorkingDirectory(request.WorkingDirectory),
+            string.IsNullOrWhiteSpace(request.Command) ? null : request.Command);
 
-        return JsonSerializer.Serialize(new DaemonResponse { Success = true, Data = JsonSerializer.Serialize(info) });
+        return Ok(JsonSerializer.Serialize(info));
     }
 
-    private string HandleSessionWrite(DaemonRequest request)
+    private DaemonResponse HandleSessionWrite(DaemonRequest request)
     {
-        if (request.PaneId == null) throw new ArgumentException("PaneId required");
-        var data = request.Data != null ? Convert.FromBase64String(request.Data) : [];
-        _sessionManager.WriteToSession(request.PaneId, data);
-        return JsonSerializer.Serialize(new DaemonResponse { Success = true });
+        var paneId = RequirePaneId(request);
+        var data = request.Data != null ? Convert.FromBase64String(request.Data) : Array.Empty<byte>();
+        _sessionManager.WriteToSession(paneId, data);
+        return Ok();
     }
 
-    private string HandleSessionResize(DaemonRequest request)
+    private DaemonResponse HandleSessionResize(DaemonRequest request)
     {
-        if (request.PaneId == null) throw new ArgumentException("PaneId required");
-        _sessionManager.ResizeSession(request.PaneId, request.Cols ?? 120, request.Rows ?? 30);
-        return JsonSerializer.Serialize(new DaemonResponse { Success = true });
+        var paneId = RequirePaneId(request);
+        _sessionManager.ResizeSession(
+            paneId,
+            DaemonInputValidation.ClampCols(request.Cols ?? 120),
+            DaemonInputValidation.ClampRows(request.Rows ?? 30));
+        return Ok();
     }
 
-    private string HandleSessionClose(DaemonRequest request)
+    private DaemonResponse HandleSessionClose(DaemonRequest request)
     {
-        if (request.PaneId == null) throw new ArgumentException("PaneId required");
-        _sessionManager.CloseSession(request.PaneId);
-        return JsonSerializer.Serialize(new DaemonResponse { Success = true });
+        // Closing a pane that is already gone is a success
+        _sessionManager.CloseSession(RequirePaneId(request));
+        return Ok();
     }
 
-    private string HandleSessionList()
+    private DaemonResponse HandleSessionList()
     {
-        var sessions = _sessionManager.ListSessions();
-        return JsonSerializer.Serialize(new DaemonResponse { Success = true, Data = JsonSerializer.Serialize(sessions) });
+        return Ok(JsonSerializer.Serialize(_sessionManager.ListSessions()));
     }
 
-    private string HandleSessionSnapshot(DaemonRequest request)
+    private DaemonResponse HandleSessionSnapshot(DaemonRequest request)
     {
-        if (request.PaneId == null) throw new ArgumentException("PaneId required");
-        var snapshot = _sessionManager.GetSnapshot(request.PaneId);
-        return JsonSerializer.Serialize(new DaemonResponse { Success = true, Data = snapshot });
+        return Ok(_sessionManager.GetSnapshot(RequirePaneId(request)));
     }
+
+    private DaemonResponse HandleSessionCwd(DaemonRequest request)
+    {
+        var session = _sessionManager.GetSession(RequirePaneId(request));
+        if (session == null)
+            return Fail("Session not found.");
+
+        return Ok(session.GetLiveWorkingDirectory());
+    }
+
+    private static string RequirePaneId(DaemonRequest request) =>
+        request.PaneId ?? throw new ArgumentException("PaneId required");
+
+    private static DaemonResponse Ok(string? data = null) => new() { Success = true, Data = data };
+
+    private static DaemonResponse Fail(string error) => new() { Success = false, Error = error };
+
+    private static string Serialize(DaemonResponse response) => JsonSerializer.Serialize(response);
 
     private void BroadcastEvent(DaemonEvent evt)
     {
         var json = JsonSerializer.Serialize(evt);
-        foreach (var kvp in _clientChannels)
+        foreach (var client in _clients.Values)
         {
-            kvp.Value.Writer.TryWrite(json);
+            if (!client.Outbox.Writer.TryWrite(json))
+                DisconnectSlowClient(client);
         }
     }
+
+    private void DisconnectSlowClient(ClientConnection client)
+    {
+        Log.Info($"[PipeServer:{client.Id}] Outbox full; disconnecting slow client.");
+        client.Outbox.Writer.TryComplete();
+        // Disposing the pipe unblocks the read loop and the writer thread
+        client.Pipe.Dispose();
+    }
+
+    private static void LogDaemon(string message) => Log.Debug(message);
 }

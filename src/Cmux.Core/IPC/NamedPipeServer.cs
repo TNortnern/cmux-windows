@@ -1,6 +1,7 @@
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using Cmux.Core.Services;
 
 namespace Cmux.Core.IPC;
 
@@ -8,9 +9,14 @@ namespace Cmux.Core.IPC;
 /// Named pipe server for cmux CLI/API communication.
 /// Windows equivalent of the Unix domain socket used by cmux on macOS.
 /// Pipe name: \\.\pipe\cmux (or \\.\pipe\cmux-{tag} for tagged instances).
+/// One request per connection: "COMMAND {json object}". The legacy "COMMAND key=value ..." form is also accepted.
 /// </summary>
 public sealed class NamedPipeServer : IDisposable
 {
+    internal const int MaxRequestBytes = 1024 * 1024;
+    private static readonly TimeSpan RequestReadTimeout = TimeSpan.FromSeconds(10);
+    private static readonly UTF8Encoding s_utf8 = new(encoderShouldEmitUTF8Identifier: false);
+
     private readonly string _pipeName;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
@@ -25,112 +31,114 @@ public sealed class NamedPipeServer : IDisposable
 
     public NamedPipeServer(string? tag = null)
     {
-        _pipeName = string.IsNullOrEmpty(tag) ? "cmux" : $"cmux-{tag}";
+        _pipeName = PipeNameFor(tag);
     }
+
+    internal static string PipeNameFor(string? tag) => string.IsNullOrEmpty(tag) ? "cmux" : $"cmux-{tag}";
 
     public void Start()
     {
+        if (_cts != null) return;
+
+        // Create the first instance synchronously so clients can connect as soon as Start returns.
+        var first = PipeSecurityFactory.CreateServer(_pipeName);
         _cts = new CancellationTokenSource();
-        _listenTask = Task.Run(() => ListenLoop(_cts.Token));
+        var ct = _cts.Token;
+        _listenTask = Task.Run(() => ListenLoop(first, ct));
     }
 
-    private async Task ListenLoop(CancellationToken ct)
+    private async Task ListenLoop(NamedPipeServerStream? nextPipe, CancellationToken ct)
     {
+        NamedPipeServerStream? pipe = nextPipe;
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                var pipe = new NamedPipeServerStream(
-                    _pipeName,
-                    PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
-
+                pipe ??= PipeSecurityFactory.CreateServer(_pipeName);
                 await pipe.WaitForConnectionAsync(ct);
 
-                // Handle each connection on its own task
-                _ = Task.Run(() => HandleConnection(pipe, ct), ct);
+                // Ownership of the stream moves to the connection handler.
+                var connected = pipe;
+                pipe = null;
+                _ = Task.Run(() => HandleConnection(connected, ct));
             }
             catch (OperationCanceledException)
             {
                 break;
             }
-            catch (IOException)
+            catch (Exception ex)
             {
-                // Pipe error, retry
-                await Task.Delay(100, ct);
+                pipe?.Dispose();
+                pipe = null;
+                Log.Error("[NamedPipe] Listen error, retrying", ex);
+                try { await Task.Delay(200, ct); }
+                catch (OperationCanceledException) { break; }
             }
         }
+
+        pipe?.Dispose();
     }
 
     private async Task HandleConnection(NamedPipeServerStream pipe, CancellationToken ct)
     {
-        try
+        using (pipe)
         {
-            using (pipe)
+            try
             {
-                using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
-                using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
+                using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                readCts.CancelAfter(RequestReadTimeout);
 
-                var requestLine = await reader.ReadLineAsync(ct);
-                if (string.IsNullOrEmpty(requestLine)) return;
+                var requestLine = await PipeLineReader.ReadLineAsync(pipe, MaxRequestBytes, readCts.Token);
+                if (requestLine == null) return; // EOF, empty, or over the size cap: drop without replying
 
-                // Parse: COMMAND key1=value1 key2=value2 ...
+                // Parse: COMMAND [json | key=value ...]
                 var parts = requestLine.Split(' ', 2);
                 var command = parts[0].ToUpperInvariant();
                 var args = new Dictionary<string, string>();
-
                 if (parts.Length > 1)
                 {
                     ParseArgs(parts[1], args);
                 }
 
-                string response;
-                if (OnCommand != null)
-                {
-                    response = await OnCommand(command, args);
-                }
-                else
-                {
-                    response = JsonSerializer.Serialize(new { error = "No handler registered" });
-                }
+                var response = await DispatchAsync(command, args);
 
+                using var writer = new StreamWriter(pipe, s_utf8, leaveOpen: true) { AutoFlush = true };
                 await writer.WriteLineAsync(response);
             }
-        }
-        catch (IOException)
-        {
-            // Client disconnected
-        }
-        catch (OperationCanceledException)
-        {
-            // Server shutting down
+            catch (IOException)
+            {
+                // Client disconnected mid-request
+            }
+            catch (OperationCanceledException)
+            {
+                // Read timeout or server shutting down
+            }
         }
     }
 
-    private static void ParseArgs(string argsString, Dictionary<string, string> args)
+    private async Task<string> DispatchAsync(string command, Dictionary<string, string> args)
     {
-        // Support both key=value and JSON formats
-        var trimmed = argsString.Trim();
-        if (trimmed.StartsWith('{'))
-        {
-            try
-            {
-                var json = JsonSerializer.Deserialize<Dictionary<string, string>>(trimmed);
-                if (json != null)
-                {
-                    foreach (var kvp in json)
-                        args[kvp.Key] = kvp.Value;
-                    return;
-                }
-            }
-            catch
-            {
-                // Fall through to key=value parsing
-            }
-        }
+        if (OnCommand == null)
+            return JsonSerializer.Serialize(new { error = "No handler registered" });
 
+        try
+        {
+            return await OnCommand(command, args);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"[NamedPipe] Command {command} failed", ex);
+            return JsonSerializer.Serialize(new { error = ex.Message });
+        }
+    }
+
+    internal static void ParseArgs(string argsString, Dictionary<string, string> args)
+    {
+        var trimmed = argsString.Trim();
+        if (trimmed.StartsWith('{') && TryParseJsonArgs(trimmed, args))
+            return;
+
+        // Legacy form: key=value (quotes group values with spaces); bare words become positional args
         foreach (var part in SplitRespectingQuotes(trimmed))
         {
             int eq = part.IndexOf('=');
@@ -142,9 +150,34 @@ public sealed class NamedPipeServer : IDisposable
             }
             else
             {
-                // Positional argument
                 args.TryAdd("_arg" + args.Count, part);
             }
+        }
+    }
+
+    private static bool TryParseJsonArgs(string json, Dictionary<string, string> args)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Null)
+                    continue;
+
+                args[prop.Name] = prop.Value.ValueKind == JsonValueKind.String
+                    ? prop.Value.GetString() ?? ""
+                    : prop.Value.GetRawText();
+            }
+            return true;
+        }
+        catch (JsonException)
+        {
+            // Not JSON after all: caller falls back to key=value parsing
+            return false;
         }
     }
 
@@ -200,39 +233,5 @@ public sealed class NamedPipeServer : IDisposable
     {
         Stop();
         _cts?.Dispose();
-    }
-}
-
-/// <summary>
-/// Client for connecting to the cmux named pipe server (used by the CLI).
-/// </summary>
-public static class NamedPipeClient
-{
-    public static async Task<string> SendCommand(string command, Dictionary<string, string>? args = null, string? tag = null, int timeoutMs = 5000)
-    {
-        var pipeName = string.IsNullOrEmpty(tag) ? "cmux" : $"cmux-{tag}";
-
-        using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-        using var cts = new CancellationTokenSource(timeoutMs);
-
-        await pipe.ConnectAsync(cts.Token);
-
-        using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
-        using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-
-        var sb = new StringBuilder(command);
-        if (args != null)
-        {
-            foreach (var kvp in args)
-            {
-                var value = kvp.Value.Contains(' ') ? $"\"{kvp.Value}\"" : kvp.Value;
-                sb.Append($" {kvp.Key}={value}");
-            }
-        }
-
-        await writer.WriteLineAsync(sb.ToString());
-
-        var response = await reader.ReadLineAsync(cts.Token);
-        return response ?? "";
     }
 }

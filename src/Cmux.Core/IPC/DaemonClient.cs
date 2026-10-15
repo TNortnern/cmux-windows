@@ -1,22 +1,26 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using Cmux.Core.Services;
 
 namespace Cmux.Core.IPC;
 
 public sealed class DaemonClient : IDisposable
 {
     private const string PipeName = "cmux-daemon";
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(3);
+
     private NamedPipeClientStream? _pipe;
     private StreamReader? _reader;
     private volatile bool _connected; // set after pipe + reader are ready
     private CancellationTokenSource? _listenCts;
     private volatile bool _disposed;
 
-    // Synchronization: only one request at a time, listen loop feeds response back via TCS
-    private readonly SemaphoreSlim _requestLock = new(1, 1);
-    private TaskCompletionSource<DaemonResponse?>? _pendingResponse;
+    // Requests awaiting a response, keyed by DaemonRequest.Id. The listen loop completes them.
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<DaemonResponse?>> _pending = new();
+    private readonly object _writeLock = new();
 
     public bool IsConnected => _pipe?.IsConnected == true && _connected;
 
@@ -37,21 +41,20 @@ public sealed class DaemonClient : IDisposable
     {
         if (IsConnected) return true;
 
+        NamedPipeClientStream? pipe = null;
         try
         {
-            // Use PipeOptions.Asynchronous (overlapped I/O) so that reads and writes
-            // can proceed concurrently on the same handle. With PipeOptions.None, Windows
-            // serializes all I/O on non-overlapped handles — the listen loop's blocking
-            // Read prevents WriteToPipe from completing, causing a deadlock.
-            var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            LogDaemon($"[Connect] Calling pipe.Connect({timeoutMs})...");
+            // Asynchronous (overlapped) so reads and writes can proceed concurrently on one handle.
+            // CurrentUserOnly makes the OS verify the server pipe is owned by this user.
+            pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             pipe.Connect(timeoutMs);
-            LogDaemon($"[Connect] pipe.Connect returned OK, IsConnected={pipe.IsConnected}");
 
+            var reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
             _pipe = pipe;
-            _reader = new StreamReader(_pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
+            _reader = reader;
             _connected = true;
-            StartListening();
+            pipe = null; // now owned by this client
+            StartListening(reader);
             LogDaemon("[Connect] Pipe connected, reader ready.");
             return true;
         }
@@ -62,8 +65,12 @@ public sealed class DaemonClient : IDisposable
         }
         catch (Exception ex)
         {
-            LogDaemon($"[Connect] Error: {ex.GetType().Name}: {ex.Message}");
+            LogDaemon($"[Connect] Error: {ex.GetType().Name}");
             return false;
+        }
+        finally
+        {
+            pipe?.Dispose();
         }
     }
 
@@ -79,8 +86,11 @@ public sealed class DaemonClient : IDisposable
         try
         {
             var exePath = FindDaemonExecutable();
-            LogDaemon($"[TryStart] FindDaemonExecutable: {exePath ?? "(null)"}");
-            if (exePath == null) return false;
+            if (exePath == null)
+            {
+                LogDaemon("[TryStart] Daemon executable not found");
+                return false;
+            }
 
             var psi = new ProcessStartInfo
             {
@@ -90,9 +100,7 @@ public sealed class DaemonClient : IDisposable
                 WindowStyle = ProcessWindowStyle.Hidden,
             };
 
-            var proc = Process.Start(psi);
-            LogDaemon($"[TryStart] Process.Start: pid={proc?.Id}, exited={proc?.HasExited}");
-
+            using var proc = Process.Start(psi);
             if (proc == null)
             {
                 LogDaemon("[TryStart] Process.Start returned null");
@@ -102,21 +110,18 @@ public sealed class DaemonClient : IDisposable
             // Retry connecting until daemon is ready
             for (int attempt = 0; attempt < maxRetries; attempt++)
             {
-                // Try connecting first, then sleep (daemon might be ready already)
                 if (TryConnect(1000))
                 {
                     LogDaemon($"[TryStart] Connected on attempt {attempt + 1}");
                     return true;
                 }
 
-                // Check if daemon process crashed
                 if (proc.HasExited)
                 {
                     LogDaemon($"[TryStart] Daemon process exited with code {proc.ExitCode}");
                     return false;
                 }
 
-                LogDaemon($"[TryStart] Attempt {attempt + 1}/{maxRetries} — not yet connectable, waiting {retryDelayMs}ms...");
                 Thread.Sleep(retryDelayMs);
             }
 
@@ -125,37 +130,33 @@ public sealed class DaemonClient : IDisposable
         }
         catch (Exception ex)
         {
-            LogDaemon($"[TryStart] Exception: {ex.GetType().Name}: {ex.Message}");
+            LogDaemon($"[TryStart] Exception: {ex.GetType().Name}");
             return false;
         }
     }
 
     private static string? FindDaemonExecutable()
     {
-        var appDir = AppContext.BaseDirectory;
-        LogDaemon($"[FindDaemon] AppContext.BaseDirectory: {appDir}");
-
-        // 1. Look next to the current executable (deployed/published scenario)
-        var candidate = Path.Combine(appDir, "cmux-daemon.exe");
+        // Published layout: the daemon sits next to the app executable.
+        var candidate = Path.Combine(AppContext.BaseDirectory, "cmux-daemon.exe");
         if (File.Exists(candidate)) return candidate;
 
-        // 2. Look in sibling project build output (dev build scenario)
-        //    appDir is e.g. .../src/Cmux/bin/Debug/net10.0-windows10.0.17763.0/
-        //    daemon is at   .../src/Cmux.Daemon/bin/Debug/net10.0-windows/cmux-daemon.exe
+#if DEBUG
+        // Dev-tree fallback: walk up to the repo's src folder and search the daemon build output.
+        //   appDir: .../src/Cmux/bin/Debug/net10.0-windows10.0.17763.0/
+        //   daemon: .../src/Cmux.Daemon/bin/Debug/net10.0-windows/cmux-daemon.exe
         try
         {
-            var dir = new DirectoryInfo(appDir);
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
             while (dir != null && !string.Equals(dir.Name, "src", StringComparison.OrdinalIgnoreCase))
                 dir = dir.Parent;
-
-            LogDaemon($"[FindDaemon] Traversed to src dir: {dir?.FullName ?? "(null)"}");
 
             if (dir != null)
             {
                 var daemonBin = Path.Combine(dir.FullName, "Cmux.Daemon", "bin");
                 if (Directory.Exists(daemonBin))
                 {
-                    var config = appDir.Contains("Release", StringComparison.OrdinalIgnoreCase) ? "Release" : "Debug";
+                    var config = AppContext.BaseDirectory.Contains("Release", StringComparison.OrdinalIgnoreCase) ? "Release" : "Debug";
                     var configDir = Path.Combine(daemonBin, config);
                     if (Directory.Exists(configDir))
                     {
@@ -171,20 +172,21 @@ public sealed class DaemonClient : IDisposable
                 }
             }
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Filesystem errors during search — not critical
+            LogDaemon($"[FindDaemon] Dev-tree search failed: {ex.GetType().Name}");
         }
+#endif
 
         return null;
     }
 
-    private void StartListening()
+    private void StartListening(StreamReader reader)
     {
         _listenCts = new CancellationTokenSource();
-        // Use a dedicated background thread for reading — not Task.Run —
-        // because ReadLine blocks the calling thread.
-        var thread = new Thread(() => ListenLoop(_listenCts.Token))
+        var ct = _listenCts.Token;
+        // Dedicated thread: ReadLine blocks.
+        var thread = new Thread(() => ListenLoop(reader, ct))
         {
             IsBackground = true,
             Name = "DaemonClient-Listen",
@@ -192,170 +194,145 @@ public sealed class DaemonClient : IDisposable
         thread.Start();
     }
 
-    private void ListenLoop(CancellationToken ct)
+    private void ListenLoop(StreamReader reader, CancellationToken ct)
     {
         try
         {
-            while (!ct.IsCancellationRequested && _reader != null)
+            while (!ct.IsCancellationRequested)
             {
-                var line = _reader.ReadLine();
+                var line = reader.ReadLine();
                 if (line == null) break;
-
-                // Try to parse as a DaemonResponse first (if a request is pending)
-                if (_pendingResponse != null)
-                {
-                    try
-                    {
-                        var response = JsonSerializer.Deserialize<DaemonResponse>(line);
-                        if (response != null && _pendingResponse != null)
-                        {
-                            // Responses have Success property; events have Type property
-                            // Check if this looks like a response (has Success field)
-                            if (line.Contains("\"Success\"", StringComparison.OrdinalIgnoreCase))
-                            {
-                                var tcs = _pendingResponse;
-                                _pendingResponse = null;
-                                tcs.TrySetResult(response);
-                                continue;
-                            }
-                        }
-                    }
-                    catch { }
-                }
-
-                // Try as event
-                try
-                {
-                    var evt = JsonSerializer.Deserialize<DaemonEvent>(line);
-                    if (evt != null && !string.IsNullOrEmpty(evt.Type))
-                    {
-                        DispatchEvent(evt);
-                    }
-                }
-                catch { }
+                HandleLine(line);
             }
         }
-        catch (IOException) { }
-        catch (OperationCanceledException) { }
+        catch (IOException) { } // Daemon went away: the finally block reports the disconnect
+        catch (ObjectDisposedException) { } // Dispose() closed the pipe underneath us: expected
         finally
         {
             _connected = false; // Prevent new requests from entering SendRequestAsync
-            _pendingResponse?.TrySetResult(null);
+            foreach (var id in _pending.Keys)
+            {
+                if (_pending.TryRemove(id, out var tcs))
+                    tcs.TrySetResult(null);
+            }
             Disconnected?.Invoke();
         }
     }
 
-    private void DispatchEvent(DaemonEvent evt)
+    /// <summary>
+    /// Parses each line once. A line with a non-empty "Id" is a response to that request;
+    /// otherwise it is an event (which carries "Type").
+    /// </summary>
+    private void HandleLine(string line)
     {
-        switch (evt.Type)
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return;
+
+            var id = GetString(root, "Id");
+            if (!string.IsNullOrEmpty(id))
+            {
+                if (_pending.TryRemove(id, out var tcs))
+                {
+                    DaemonResponse? response;
+                    try { response = root.Deserialize<DaemonResponse>(); }
+                    catch (JsonException) { response = null; }
+                    tcs.TrySetResult(response);
+                }
+                return;
+            }
+
+            var type = GetString(root, "Type");
+            if (!string.IsNullOrEmpty(type))
+                DispatchEvent(root, type);
+        }
+        catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException)
+        {
+            // Malformed line or a failing subscriber: drop it without logging its contents
+            LogDaemon($"[Listen] Dropped line: {ex.GetType().Name}");
+        }
+    }
+
+    private void DispatchEvent(JsonElement evt, string type)
+    {
+        var paneId = GetString(evt, "PaneId");
+        switch (type)
         {
             case DaemonMessageTypes.EventOutput:
-                if (evt.PaneId != null && evt.Data != null)
-                {
-                    try
-                    {
-                        var bytes = Convert.FromBase64String(evt.Data);
-                        RawOutputReceived?.Invoke(evt.PaneId, bytes);
-                    }
-                    catch { }
-                }
+                if (paneId != null && evt.TryGetProperty("Data", out var data) && data.ValueKind == JsonValueKind.String)
+                    RawOutputReceived?.Invoke(paneId, data.GetBytesFromBase64());
                 break;
             case DaemonMessageTypes.EventExited:
-                if (evt.PaneId != null)
-                    SessionExited?.Invoke(evt.PaneId, int.TryParse(evt.Data, out var code) ? code : -1);
+                if (paneId != null)
+                    SessionExited?.Invoke(paneId, int.TryParse(GetString(evt, "Data"), out var code) ? code : -1);
                 break;
             case DaemonMessageTypes.EventTitleChanged:
-                if (evt.PaneId != null && evt.Data != null)
-                    TitleChanged?.Invoke(evt.PaneId, evt.Data);
+                if (paneId != null && GetString(evt, "Data") is { } title)
+                    TitleChanged?.Invoke(paneId, title);
                 break;
             case DaemonMessageTypes.EventCwdChanged:
-                if (evt.PaneId != null && evt.Data != null)
-                    CwdChanged?.Invoke(evt.PaneId, evt.Data);
+                if (paneId != null && GetString(evt, "Data") is { } cwd)
+                    CwdChanged?.Invoke(paneId, cwd);
                 break;
             case DaemonMessageTypes.EventBell:
-                if (evt.PaneId != null)
-                    BellReceived?.Invoke(evt.PaneId);
+                if (paneId != null)
+                    BellReceived?.Invoke(paneId);
                 break;
         }
     }
 
+    private static string? GetString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
     /// <summary>
-    /// Writes a JSON line directly to the pipe as raw bytes.
-    /// This avoids StreamWriter.Flush() → FlushFileBuffers which blocks on synchronous pipes.
-    /// Stream.Write() puts data in the pipe buffer immediately without blocking.
+    /// Writes one JSON line as raw bytes. Stream.Write avoids StreamWriter.Flush, which blocks on
+    /// synchronous pipes. Writes are serialized with a lock so concurrent requests never interleave.
     /// </summary>
     private void WriteToPipe(string line)
     {
-        if (_pipe == null) return;
+        var pipe = _pipe ?? throw new IOException("Not connected to the daemon.");
         var bytes = Encoding.UTF8.GetBytes(line + "\n");
-        _pipe.Write(bytes, 0, bytes.Length);
+        lock (_writeLock)
+        {
+            pipe.Write(bytes, 0, bytes.Length);
+        }
     }
 
     private async Task<DaemonResponse?> SendRequestAsync(DaemonRequest request)
     {
-        if (!IsConnected || _pipe == null)
-        {
-            LogDaemon($"[SendRequest] Bail: IsConnected={IsConnected}, pipe={(_pipe != null ? "set" : "null")}");
-            return null;
-        }
+        if (!IsConnected) return null;
 
-        await _requestLock.WaitAsync().ConfigureAwait(false);
+        var id = Guid.NewGuid().ToString("N");
+        request.Id = id;
+        var tcs = new TaskCompletionSource<DaemonResponse?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pending[id] = tcs;
         try
         {
-            var tcs = new TaskCompletionSource<DaemonResponse?>();
-            _pendingResponse = tcs;
-
-            var json = JsonSerializer.Serialize(request);
-            if (request.Type != DaemonMessageTypes.SessionWrite)
-                LogDaemon($"[SendRequest] Writing: {json[..Math.Min(json.Length, 200)]}");
-
-            try
-            {
-                WriteToPipe(json);
-            }
-            catch (IOException)
-            {
-                _connected = false;
-                _pendingResponse = null;
-                return null;
-            }
-
-            // Wait for listen loop to deliver the response (3s timeout)
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-            timeoutCts.Token.Register(() => tcs.TrySetResult(null));
-
-            var response = await tcs.Task.ConfigureAwait(false);
-            LogDaemon($"[SendRequest] Response: Success={response?.Success}, Error={response?.Error}, DataLen={response?.Data?.Length}");
-            return response;
+            WriteToPipe(JsonSerializer.Serialize(request));
+            return await tcs.Task.WaitAsync(RequestTimeout).ConfigureAwait(false);
         }
-        catch (Exception ex)
+        catch (TimeoutException)
         {
-            LogDaemon($"[SendRequest] Exception: {ex.GetType().Name}: {ex.Message}");
-            _pendingResponse = null;
+            LogDaemon($"[Request] {request.Type} timed out");
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            LogDaemon($"[Request] {request.Type} failed: {ex.GetType().Name}");
             return null;
         }
         finally
         {
-            _requestLock.Release();
+            _pending.TryRemove(id, out _);
         }
     }
 
-    public static void LogDaemon(string message)
-    {
-        try
-        {
-            var logDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux");
-            Directory.CreateDirectory(logDir);
-            var logPath = Path.Combine(logDir, "daemon-debug.log");
-            // Use FileShare.ReadWrite so daemon and client can write concurrently
-            // without blocking each other (File.AppendAllText uses FileShare.Read which blocks).
-            using var fs = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-            using var sw = new StreamWriter(fs);
-            sw.Write($"[{DateTime.Now:HH:mm:ss.fff}] {message}\n");
-        }
-        catch { }
-    }
+    /// <summary>Debug diagnostics, written only when CMUX_DEBUG=1. Never pass request bodies.</summary>
+    public static void LogDaemon(string message) => Log.Debug(message);
 
     public async Task<DaemonSessionInfo?> CreateSessionAsync(string paneId, int cols, int rows, string? workingDirectory = null, string? command = null)
     {
@@ -409,7 +386,16 @@ public sealed class DaemonClient : IDisposable
         });
     }
 
-    public Task<string?> GetLiveWorkingDirectoryAsync(string paneId) => Task.FromResult<string?>(null); // STUB: package A implements
+    /// <summary>Returns the session's live working directory (OSC 7 / process cwd), or null if unavailable.</summary>
+    public async Task<string?> GetLiveWorkingDirectoryAsync(string paneId)
+    {
+        var response = await SendRequestAsync(new DaemonRequest
+        {
+            Type = DaemonMessageTypes.SessionCwd,
+            PaneId = paneId,
+        });
+        return response?.Success == true ? response.Data : null;
+    }
 
     public async Task<List<DaemonSessionInfo>> ListSessionsAsync()
     {
@@ -453,6 +439,11 @@ public sealed class DaemonClient : IDisposable
         _reader?.Dispose();
         _pipe?.Dispose();
         _listenCts?.Dispose();
-        _requestLock.Dispose();
+
+        foreach (var id in _pending.Keys)
+        {
+            if (_pending.TryRemove(id, out var tcs))
+                tcs.TrySetResult(null);
+        }
     }
 }

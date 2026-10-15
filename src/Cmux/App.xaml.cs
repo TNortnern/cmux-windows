@@ -21,17 +21,20 @@ public partial class App : Application
     public static AgentConversationStoreService AgentConversationStore => _agentConversationStore.Value;
     public static AgentRuntimeService AgentRuntime => _agentRuntime.Value;
     public static bool IsAgentRuntimeCreated => _agentRuntime.IsValueCreated;
-    public static DaemonClient DaemonClient { get; } = new();
+    // Created on first use. With UseSessionDaemon off, nothing here ever constructs or touches it.
+    private static readonly Lazy<DaemonClient> _daemonClient = new(() => new DaemonClient());
+    public static DaemonClient DaemonClient => _daemonClient.Value;
+    public static bool IsDaemonClientCreated => _daemonClient.IsValueCreated;
     public static Task<bool> DaemonConnectTask { get; private set; } = Task.FromResult(false);
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
-        // Add global exception handlers to diagnose crashes
+        // Global exception handlers: log the exception, then show it
         DispatcherUnhandledException += (s, args) =>
         {
-            System.Diagnostics.Debug.WriteLine($"[CRASH] DispatcherUnhandledException: {args.Exception}");
+            Log.Error("[CRASH] DispatcherUnhandledException", args.Exception);
             System.Windows.MessageBox.Show($"Unexpected error: {args.Exception.Message}\n\n{args.Exception.StackTrace}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
         };
@@ -39,7 +42,7 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += (s, args) =>
         {
             var ex = args.ExceptionObject as Exception;
-            System.Diagnostics.Debug.WriteLine($"[CRASH] UnhandledException: {ex}");
+            Log.Error("[CRASH] UnhandledException", ex);
             System.Windows.MessageBox.Show($"Fatal error: {ex?.Message}\n\n{ex?.StackTrace}", "Fatal Error", MessageBoxButton.OK, MessageBoxImage.Error);
         };
 
@@ -48,26 +51,16 @@ public partial class App : Application
         PipeServer = _pipeServer;
         _pipeServer.Start();
 
-        // Daemon connect: try existing daemon first, then start one if needed.
-        // Sessions wait for this task before deciding local vs daemon mode.
-        DaemonConnectTask = Task.Run(() =>
+        if (SettingsService.Current.UseSessionDaemon)
         {
-            DaemonLog("[App] Phase 1: Quick daemon check (300ms)...");
-            if (DaemonClient.TryConnect(300))
-            {
-                DaemonLog("[App] Phase 1: Daemon connected!");
-                DaemonClient.RaiseConnected();
-                return true;
-            }
-            DaemonLog("[App] Phase 1: Daemon not available, starting daemon...");
-
-            var connected = DaemonClient.StartDaemonAndConnect();
-            DaemonLog(connected
-                ? "[App] Phase 2: Daemon started and connected"
-                : "[App] Phase 2: Daemon failed to start");
-            if (connected) DaemonClient.RaiseConnected();
-            return connected;
-        });
+            // Opt-in daemon: try an existing daemon first, then start one if needed.
+            // Sessions wait for this task before deciding local vs daemon mode.
+            DaemonConnectTask = Task.Run(ConnectDaemon);
+        }
+        else
+        {
+            DaemonConnectTask = Task.FromResult(false);
+        }
 
         // Wire up Windows toast notifications
         NotificationService.NotificationAdded += notification =>
@@ -82,13 +75,33 @@ public partial class App : Application
         };
     }
 
+    private static bool ConnectDaemon()
+    {
+        var client = DaemonClient;
+        DaemonLog("[App] Phase 1: Quick daemon check (300ms)...");
+        if (client.TryConnect(300))
+        {
+            DaemonLog("[App] Phase 1: Daemon connected!");
+            client.RaiseConnected();
+            return true;
+        }
+        DaemonLog("[App] Phase 1: Daemon not available, starting daemon...");
+
+        var connected = client.StartDaemonAndConnect();
+        DaemonLog(connected
+            ? "[App] Phase 2: Daemon started and connected"
+            : "[App] Phase 2: Daemon failed to start");
+        if (connected) client.RaiseConnected();
+        return connected;
+    }
+
     protected override void OnExit(ExitEventArgs e)
     {
         _pipeServer?.Dispose();
-        DaemonClient.Dispose();
+        if (_daemonClient.IsValueCreated) _daemonClient.Value.Dispose();
         if (IsAgentRuntimeCreated) AgentRuntime.Dispose();
         base.OnExit(e);
     }
 
-    internal static void DaemonLog(string message) => DaemonClient.LogDaemon(message);
+    internal static void DaemonLog(string message) => Log.Debug(message);
 }

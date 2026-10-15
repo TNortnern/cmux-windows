@@ -1,3 +1,5 @@
+using System.IO;
+using System.Reflection;
 using System.Text.Json;
 using Cmux.Core.IPC;
 
@@ -12,13 +14,16 @@ namespace Cmux.Cli;
 ///   cmux workspace list
 ///   cmux workspace create --name "My Workspace"
 ///   cmux workspace select --index 0
-///   cmux surface create
+///   cmux surface create --cwd C:\projects
 ///   cmux split right
 ///   cmux split down
 ///   cmux status
 /// </summary>
 public static class Program
 {
+    private const string NotRunningMessage = "Error: Could not connect to cmux. Is it running?";
+    private static readonly JsonSerializerOptions s_indented = new() { WriteIndented = true };
+
     public static async Task<int> Main(string[] args)
     {
         if (args.Length == 0)
@@ -43,9 +48,10 @@ public static class Program
                 _ => Error($"Unknown command: {command}"),
             };
         }
-        catch (TimeoutException)
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException or FileNotFoundException)
         {
-            Console.Error.WriteLine("Error: Could not connect to cmux. Is it running?");
+            // Pipe missing or no answer in time: the app is almost certainly not running
+            Console.Error.WriteLine(NotRunningMessage);
             return 1;
         }
         catch (Exception ex)
@@ -108,7 +114,7 @@ public static class Program
 
         return subcommand switch
         {
-            "create" or "new" => await SendAndPrint("SURFACE.CREATE"),
+            "create" or "new" => await SendAndPrint("SURFACE.CREATE", ParseSurfaceCreateArgs(args[1..])),
             "next" => await SendAndPrint("SURFACE.NEXT"),
             "previous" or "prev" => await SendAndPrint("SURFACE.PREVIOUS"),
             _ => Error($"Unknown surface command: {subcommand}"),
@@ -142,19 +148,39 @@ public static class Program
     {
         var response = await NamedPipeClient.SendCommand(command, args);
 
-        // Pretty-print JSON
+        // Pretty-print JSON; a non-JSON response is printed as-is
         try
         {
             using var doc = JsonDocument.Parse(response);
-            var pretty = JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true });
-            Console.WriteLine(pretty);
+            Console.WriteLine(JsonSerializer.Serialize(doc, s_indented));
         }
-        catch
+        catch (JsonException)
         {
             Console.WriteLine(response);
         }
 
         return 0;
+    }
+
+    /// <summary>Accepts --cwd &lt;dir&gt;, --cwd=&lt;dir&gt; or cwd=&lt;dir&gt;; forwards the full path to the app.</summary>
+    private static Dictionary<string, string>? ParseSurfaceCreateArgs(string[] args)
+    {
+        string? cwd = null;
+        for (int i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg == "--cwd" && i + 1 < args.Length)
+                cwd = args[++i];
+            else if (arg.StartsWith("--cwd=", StringComparison.OrdinalIgnoreCase))
+                cwd = arg["--cwd=".Length..];
+            else if (arg.StartsWith("cwd=", StringComparison.OrdinalIgnoreCase))
+                cwd = arg["cwd=".Length..];
+        }
+
+        if (string.IsNullOrWhiteSpace(cwd))
+            return null;
+
+        return new Dictionary<string, string> { ["cwd"] = Path.GetFullPath(cwd) };
     }
 
     private static Dictionary<string, string> ParseArgs(string[] args)
@@ -228,6 +254,7 @@ public static class Program
 
               surface               Manage surfaces (tabs within workspace)
                 create              Create a new surface
+                  --cwd <dir>       Starting directory
                 next                Switch to next surface
                 previous            Switch to previous surface
 
@@ -256,9 +283,14 @@ public static class Program
 
     private static int PrintVersion()
     {
-        Console.WriteLine("cmux 1.0.6 (Windows)");
+        Console.WriteLine($"cmux {AppVersion} (Windows)");
         return 0;
     }
+
+    // Informational version without the "+commit" build metadata suffix
+    private static string AppVersion =>
+        typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0]
+        ?? "unknown";
 
     private static int Error(string message)
     {

@@ -7,6 +7,16 @@
     <AssemblyName>cmux-daemon</AssemblyName>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <!-- Small, long-lived process: favor low memory over throughput tuning -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>false</TieredPGO>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Cmux.Core\Cmux.Core.csproj" />
   </ItemGroup>

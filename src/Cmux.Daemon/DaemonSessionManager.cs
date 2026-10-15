@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using Cmux.Core.IPC;
+using Cmux.Core.Services;
 using Cmux.Core.Terminal;
-using static Cmux.Core.IPC.DaemonClient;
 
 namespace Cmux.Daemon;
 
@@ -23,7 +23,7 @@ public sealed class DaemonSessionManager : IDisposable
         // If session already exists, return its info (attach/reconnect semantics)
         if (_sessions.TryGetValue(paneId, out var existing))
         {
-            LogDaemon($"[SessionMgr] Reconnecting to existing session: {paneId} (running={existing.IsRunning}, cwd={existing.WorkingDirectory})");
+            Log.Debug($"[SessionMgr] Reconnecting to existing session: {paneId} (running={existing.IsRunning})");
             return new DaemonSessionInfo
             {
                 PaneId = paneId,
@@ -32,11 +32,13 @@ public sealed class DaemonSessionManager : IDisposable
                 WorkingDirectory = existing.WorkingDirectory ?? "",
                 Title = existing.Title,
                 IsRunning = existing.IsRunning,
+                Pid = existing.ProcessId,
                 IsExisting = true,
             };
         }
 
-        LogDaemon($"[SessionMgr] Creating NEW session: {paneId} ({cols}x{rows}) cwd={workingDirectory} cmd={command}");
+        // Never log the command line: it may carry arguments or secrets
+        Log.Debug($"[SessionMgr] Creating NEW session: {paneId} ({cols}x{rows}) hasCwd={workingDirectory != null} hasCommand={command != null}");
         var session = new TerminalSession(paneId, cols, rows);
 
         session.RawOutputReceived += data =>
@@ -47,6 +49,7 @@ public sealed class DaemonSessionManager : IDisposable
         session.ProcessExited += () =>
         {
             SessionExited?.Invoke(paneId, 0);
+            RemoveExitedSession(paneId, session);
         };
 
         session.TitleChanged += title =>
@@ -76,6 +79,7 @@ public sealed class DaemonSessionManager : IDisposable
             Rows = rows,
             WorkingDirectory = session.WorkingDirectory ?? "",
             IsRunning = session.IsRunning,
+            Pid = session.ProcessId,
         };
     }
 
@@ -107,6 +111,7 @@ public sealed class DaemonSessionManager : IDisposable
             WorkingDirectory = kvp.Value.WorkingDirectory ?? "",
             Title = kvp.Value.Title,
             IsRunning = kvp.Value.IsRunning,
+            Pid = kvp.Value.ProcessId,
         }).ToList();
     }
 
@@ -122,6 +127,18 @@ public sealed class DaemonSessionManager : IDisposable
     public TerminalSession? GetSession(string paneId)
     {
         return _sessions.GetValueOrDefault(paneId);
+    }
+
+    /// <summary>Drops an exited session so its ConPTY and buffers are released. Only removes the same instance.</summary>
+    private void RemoveExitedSession(string paneId, TerminalSession session)
+    {
+        if (_sessions.TryGetValue(paneId, out var current)
+            && ReferenceEquals(current, session)
+            && _sessions.TryRemove(paneId, out _))
+        {
+            // Dispose off the session's own thread in case it joins that thread
+            Task.Run(() => session.Dispose());
+        }
     }
 
     public void Dispose()
