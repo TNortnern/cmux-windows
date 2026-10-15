@@ -11,6 +11,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Cmux.Core.Config;
 using Cmux.Core.Models;
+using Cmux.Core.Services;
 using Cmux.Core.Terminal;
 
 namespace Cmux.Controls;
@@ -19,13 +20,23 @@ namespace Cmux.Controls;
 /// WPF control that renders a TerminalBuffer and handles keyboard/mouse input.
 /// Uses DrawingVisual for efficient rendering of the terminal cell grid.
 /// Features: scrollback, URL detection, search highlights, mouse reporting, visual bell.
+/// Renders only while loaded and visible; call Detach() when the control is no longer shown.
 /// </summary>
 public class TerminalControl : FrameworkElement
 {
+    // Ghostty config is read once per process and shared; re-read on the next settings change.
+    private static GhosttyTheme? s_cachedTheme;
+
+    static TerminalControl()
+    {
+        SettingsService.SettingsChanged += () => s_cachedTheme = null;
+    }
+
     private TerminalSession? _session;
     private readonly TerminalSelection _selection = new();
     private GhosttyTheme _theme;
     private DrawingVisual _visual;
+    private string _fontFamily;
     private Typeface _typeface;
     private double _cellWidth;
     private double _cellHeight;
@@ -37,11 +48,12 @@ public class TerminalControl : FrameworkElement
     private bool _followOutput = true;
     private int _lastScrollbackCount;
     private int _renderQueued;
+    private bool _renderDirty;
     private string _cursorStyle = "bar";
     private bool _cursorBlink = true;
 
-    // Cursor blink timer
-    private System.Windows.Threading.DispatcherTimer? _cursorTimer;
+    // Cursor blink: runs only while loaded, visible, blink enabled and keyboard-focused
+    private readonly System.Windows.Threading.DispatcherTimer _cursorTimer;
     private bool _cursorVisible = true;
 
     // Visual bell
@@ -62,11 +74,7 @@ public class TerminalControl : FrameworkElement
     private readonly StringBuilder _inputLineBuffer = new();
     private bool _suppressNextEnterToShell;
 
-    // Rendering caches to avoid per-frame allocations
-    private readonly Dictionary<Color, SolidColorBrush> _brushCache = [];
-    private Typeface? _typefaceBold;
-    private Typeface? _typefaceItalic;
-    private Typeface? _typefaceBoldItalic;
+    // Reused per-run text buffer to avoid per-frame allocations
     private readonly StringBuilder _textRunBuffer = new();
     private bool _suppressNextEnterTextInput;
 
@@ -120,13 +128,14 @@ public class TerminalControl : FrameworkElement
 
     public TerminalControl()
     {
-        _theme = GhosttyConfigReader.ReadConfig();
+        _theme = s_cachedTheme ??= GhosttyConfigReader.ReadConfig();
         _visual = new DrawingVisual();
         AddVisualChild(_visual);
         AddLogicalChild(_visual);
 
+        _fontFamily = _theme.FontFamily;
         _fontSize = _theme.FontSize;
-        _typeface = new Typeface(new FontFamily(_theme.FontFamily), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        _typeface = RenderCache.GetTypeface(_fontFamily, bold: false, italic: false);
 
         var settings = SettingsService.Current;
         _cursorStyle = settings.CursorStyle;
@@ -141,7 +150,7 @@ public class TerminalControl : FrameworkElement
 
         _selection.SelectionChanged += () => RequestRender(System.Windows.Threading.DispatcherPriority.Render);
 
-        // Cursor blink
+        // Created stopped; UpdateCursorBlink starts it only while the cursor can be seen.
         _cursorTimer = new System.Windows.Threading.DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(530),
@@ -157,8 +166,18 @@ public class TerminalControl : FrameworkElement
             if (_cursorVisible != wasVisible)
                 RequestRender();
         };
-        _cursorTimer.Start();
+
+        Loaded += (_, _) => OnShownStateChanged();
+        IsVisibleChanged += (_, _) => OnShownStateChanged();
+        IsKeyboardFocusedChanged += (_, _) => UpdateCursorBlink();
+        Unloaded += (_, _) =>
+        {
+            _cursorTimer.Stop();
+            _cursorVisible = true;
+        };
     }
+
+    private bool CanRender => IsLoaded && IsVisible;
 
     public void AttachSession(TerminalSession session)
     {
@@ -176,7 +195,78 @@ public class TerminalControl : FrameworkElement
         _session.Redraw += OnRedraw;
         _session.BellReceived += OnBell;
         CalculateTerminalSize();
-        Render();
+        RequestRender(System.Windows.Threading.DispatcherPriority.Render);
+    }
+
+    /// <summary>
+    /// Releases everything that keeps a hidden or evicted control alive or busy: session
+    /// subscriptions, timers, the session reference and cached drawing. Safe to call repeatedly.
+    /// The control can be re-attached later with AttachSession.
+    /// </summary>
+    public void Detach()
+    {
+        if (_session != null)
+        {
+            _session.Redraw -= OnRedraw;
+            _session.BellReceived -= OnBell;
+            _session = null;
+        }
+
+        _cursorTimer.Stop();
+        _cursorVisible = true;
+
+        if (_bellTimer != null)
+        {
+            _bellTimer.Stop();
+            _bellTimer.Tick -= OnBellTimerTick;
+        }
+
+        _renderDirty = false;
+        _hoveredUrl = null;
+        _lastUrlRow = -1;
+        _cachedRowUrls = null;
+        _searchMatches = [];
+        _currentSearchMatch = -1;
+        _searchMatchSetCache = null;
+        _currentMatchSetCache = null;
+        _inputLineBuffer.Clear();
+        _selection.ClearSelection();
+
+        using (_visual.RenderOpen())
+        {
+            // Closing an empty drawing context drops the previously rendered cell drawings.
+        }
+    }
+
+    private void OnShownStateChanged()
+    {
+        UpdateCursorBlink();
+        if (_renderDirty && CanRender)
+            RequestRender(System.Windows.Threading.DispatcherPriority.Render);
+    }
+
+    /// <summary>
+    /// Blinks the cursor only while the control is loaded, visible, keyboard-focused and blink is enabled.
+    /// Otherwise the cursor is steady.
+    /// </summary>
+    private void UpdateCursorBlink()
+    {
+        if (_cursorBlink && CanRender && IsKeyboardFocused)
+        {
+            if (!_cursorTimer.IsEnabled)
+            {
+                _cursorVisible = true;
+                _cursorTimer.Start();
+            }
+            return;
+        }
+
+        _cursorTimer.Stop();
+        if (!_cursorVisible)
+        {
+            _cursorVisible = true;
+            RequestRender();
+        }
     }
 
     private void OnRedraw()
@@ -274,6 +364,13 @@ public class TerminalControl : FrameworkElement
 
     private void RequestRender(System.Windows.Threading.DispatcherPriority priority = System.Windows.Threading.DispatcherPriority.Background)
     {
+        // Hidden or unloaded: remember that a frame is owed; OnShownStateChanged renders it.
+        if (!CanRender)
+        {
+            _renderDirty = true;
+            return;
+        }
+
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
             return;
 
@@ -328,36 +425,76 @@ public class TerminalControl : FrameworkElement
 
     // --- Rendering ---
 
-    private SolidColorBrush GetCachedBrush(Color color)
-    {
-        if (_brushCache.TryGetValue(color, out var brush))
-            return brush;
+    private static SolidColorBrush GetCachedBrush(Color color) => RenderCache.GetBrush(color);
 
-        brush = new SolidColorBrush(color);
-        brush.Freeze();
-        _brushCache[color] = brush;
-        return brush;
+    private void ApplyFont(string fontFamily, double fontSize)
+    {
+        _fontFamily = fontFamily;
+        _fontSize = fontSize;
+        _typeface = RenderCache.GetTypeface(fontFamily, bold: false, italic: false);
     }
 
-    private void InvalidateRenderCaches()
+    private Typeface GetTypeface(bool bold, bool italic) =>
+        !bold && !italic ? _typeface : RenderCache.GetTypeface(_fontFamily, bold, italic);
+
+    /// <summary>
+    /// Wide (East Asian / fullwidth) characters and surrogates occupy more than one column,
+    /// so text runs are broken around them to keep following characters on the grid.
+    /// </summary>
+    private static bool IsWideChar(char ch) =>
+        char.IsSurrogate(ch)
+        || (ch >= 0x1100 && ch <= 0x115F)
+        || (ch >= 0x2E80 && ch <= 0xA4CF)
+        || (ch >= 0xAC00 && ch <= 0xD7A3)
+        || (ch >= 0xF900 && ch <= 0xFAFF)
+        || (ch >= 0xFE30 && ch <= 0xFE4F)
+        || (ch >= 0xFF00 && ch <= 0xFF60)
+        || (ch >= 0xFFE0 && ch <= 0xFFE6);
+
+    private TerminalCell GetRenderCell(TerminalBuffer buffer, TerminalCell[]? scrollbackLine, bool isScrollback, int bufferRow, int c)
     {
-        _brushCache.Clear();
-        _typefaceBold = null;
-        _typefaceItalic = null;
-        _typefaceBoldItalic = null;
+        if (isScrollback)
+            return scrollbackLine != null && c < scrollbackLine.Length ? scrollbackLine[c] : TerminalCell.Empty;
+
+        if (bufferRow >= 0 && bufferRow < buffer.Rows && c < buffer.Cols)
+            return buffer.CellAt(bufferRow, c);
+
+        return TerminalCell.Empty;
     }
 
-    private Typeface GetTypeface(bool bold, bool italic)
+    /// <summary>Resolves the background and foreground colors of a cell after inverse and selection.</summary>
+    private void ResolveCellColors(in TerminalCell cell, int visRow, int c, out TerminalColor bg, out TerminalColor fg)
     {
-        if (!bold && !italic) return _typeface;
-        if (bold && !italic) return _typefaceBold ??= new Typeface(new FontFamily(_theme.FontFamily), FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
-        if (!bold && italic) return _typefaceItalic ??= new Typeface(new FontFamily(_theme.FontFamily), FontStyles.Italic, FontWeights.Normal, FontStretches.Normal);
-        return _typefaceBoldItalic ??= new Typeface(new FontFamily(_theme.FontFamily), FontStyles.Italic, FontWeights.Bold, FontStretches.Normal);
+        var attr = cell.Attribute;
+        bool isSelected = _selection.IsSelected(visRow, c);
+        bool isInverse = ((attr.Flags & CellFlags.Inverse) != 0) != isSelected;
+
+        if (isInverse)
+        {
+            bg = attr.Foreground.IsDefault ? _theme.Foreground : attr.Foreground;
+            fg = attr.Background.IsDefault ? _theme.Background : attr.Background;
+        }
+        else
+        {
+            bg = attr.Background;
+            fg = attr.Foreground;
+        }
+
+        if (isSelected && _theme.SelectionBackground.HasValue)
+            bg = _theme.SelectionBackground.Value;
     }
 
     private void Render()
     {
         if (_session == null) return;
+
+        if (!CanRender)
+        {
+            _renderDirty = true;
+            return;
+        }
+
+        _renderDirty = false;
 
         try
         {
@@ -403,7 +540,8 @@ public class TerminalControl : FrameworkElement
             var searchMatchBrush = searchMatchSet.Count > 0 ? GetCachedBrush(Color.FromArgb(100, 0xFB, 0xBF, 0x24)) : null;
             var currentMatchBrush = currentMatchSet.Count > 0 ? GetCachedBrush(Color.FromArgb(180, 0xFB, 0x92, 0x3C)) : null;
 
-            // Render visible rows with batched text
+            // Render visible rows. Each row is two passes: backgrounds first (merged into
+            // runs of equal color), then highlights and text, so text is never painted under a background.
             for (int visRow = 0; visRow < _rows; visRow++)
             {
                 int virtualLine = viewStartLine + visRow;
@@ -416,58 +554,48 @@ public class TerminalControl : FrameworkElement
 
                 double y = visRow * _cellHeight;
 
-                // Text run state for batching
+                // Pass 1: background runs
+                int bgStartCol = -1;
+                TerminalColor bgRunColor = default;
+                for (int c = 0; c <= _cols; c++)
+                {
+                    TerminalColor cellBg = default;
+                    if (c < _cols)
+                    {
+                        var cell = GetRenderCell(buffer, scrollbackLine, isScrollback, bufferRow, c);
+                        ResolveCellColors(cell, visRow, c, out cellBg, out _);
+                    }
+
+                    bool hasBg = c < _cols && !cellBg.IsDefault;
+                    if (bgStartCol >= 0 && (!hasBg || cellBg != bgRunColor))
+                    {
+                        dc.DrawRectangle(GetCachedBrush(ToWpfColor(bgRunColor)), null,
+                            new Rect(bgStartCol * _cellWidth, y, (c - bgStartCol) * _cellWidth, _cellHeight));
+                        bgStartCol = -1;
+                    }
+
+                    if (hasBg && bgStartCol < 0)
+                    {
+                        bgStartCol = c;
+                        bgRunColor = cellBg;
+                    }
+                }
+
+                // Pass 2: highlights, URL underline and batched text
                 int runStartCol = -1;
                 Color runFgColor = default;
                 bool runBold = false, runItalic = false, runDim = false;
                 bool runUnderline = false, runStrikethrough = false;
+                int pendingSpaces = 0;
                 _textRunBuffer.Clear();
 
                 for (int c = 0; c < _cols; c++)
                 {
-                    TerminalCell cell;
-                    if (isScrollback)
-                    {
-                        cell = (scrollbackLine != null && c < scrollbackLine.Length)
-                            ? scrollbackLine[c]
-                            : TerminalCell.Empty;
-                    }
-                    else if (bufferRow >= 0 && bufferRow < buffer.Rows && c < buffer.Cols)
-                    {
-                        cell = buffer.CellAt(bufferRow, c);
-                    }
-                    else
-                    {
-                        cell = TerminalCell.Empty;
-                    }
+                    var cell = GetRenderCell(buffer, scrollbackLine, isScrollback, bufferRow, c);
+                    ResolveCellColors(cell, visRow, c, out _, out var cellFg);
 
                     double x = c * _cellWidth;
                     var attr = cell.Attribute;
-                    bool isSelected = _selection.IsSelected(visRow, c);
-                    bool isInverse = attr.Flags.HasFlag(CellFlags.Inverse) != isSelected;
-
-                    // Cell colors
-                    TerminalColor cellBg, cellFg;
-                    if (isInverse)
-                    {
-                        cellBg = attr.Foreground.IsDefault ? _theme.Foreground : attr.Foreground;
-                        cellFg = attr.Background.IsDefault ? _theme.Background : attr.Background;
-                    }
-                    else
-                    {
-                        cellBg = attr.Background;
-                        cellFg = attr.Foreground;
-                    }
-
-                    if (isSelected && _theme.SelectionBackground.HasValue)
-                        cellBg = _theme.SelectionBackground.Value;
-
-                    // Draw cell background
-                    if (!cellBg.IsDefault)
-                    {
-                        dc.DrawRectangle(GetCachedBrush(ToWpfColor(cellBg)), null,
-                            new Rect(x, y, _cellWidth, _cellHeight));
-                    }
 
                     // Search match highlight (behind text)
                     bool isSearchMatch = searchMatchSet.Contains((visRow, c));
@@ -485,50 +613,67 @@ public class TerminalControl : FrameworkElement
                         dc.DrawLine(urlPen, new Point(x, y + _cellHeight - 1), new Point(x + _cellWidth, y + _cellHeight - 1));
                     }
 
-                    // Text batching: group consecutive characters with same visual style
-                    bool hasChar = cell.Character != '\0' && cell.Character != ' ';
-                    if (hasChar)
+                    // Blank cells draw no glyph. They extend the current run (monospace advance keeps
+                    // the grid aligned) unless it is underlined or struck through, which must stop at the gap.
+                    char ch = cell.Character;
+                    if (ch == '\0' || ch == ' ')
                     {
-                        var fgColor = cellFg.IsDefault ? ToWpfColor(_theme.Foreground) : ToWpfColor(cellFg);
-                        bool bold = attr.Flags.HasFlag(CellFlags.Bold);
-                        bool italic = attr.Flags.HasFlag(CellFlags.Italic);
-                        bool dim = attr.Flags.HasFlag(CellFlags.Dim);
-                        bool underline = attr.Flags.HasFlag(CellFlags.Underline);
-                        bool strikethrough = attr.Flags.HasFlag(CellFlags.Strikethrough);
-
-                        // Style changed? Flush the current run first
-                        if (runStartCol >= 0 && (fgColor != runFgColor || bold != runBold ||
-                            italic != runItalic || dim != runDim ||
-                            underline != runUnderline || strikethrough != runStrikethrough))
+                        if (runStartCol >= 0 && !runUnderline && !runStrikethrough)
+                            pendingSpaces++;
+                        else if (runStartCol >= 0)
                         {
                             FlushTextRun(dc, dpi, y, runStartCol, runFgColor, runBold, runItalic, runDim, runUnderline, runStrikethrough);
                             runStartCol = -1;
                         }
-
-                        // Start new run or continue existing
-                        if (runStartCol < 0)
-                        {
-                            runStartCol = c;
-                            runFgColor = fgColor;
-                            runBold = bold;
-                            runItalic = italic;
-                            runDim = dim;
-                            runUnderline = underline;
-                            runStrikethrough = strikethrough;
-                            _textRunBuffer.Clear();
-                        }
-
-                        _textRunBuffer.Append(cell.Character);
+                        continue;
                     }
-                    else if (runStartCol >= 0)
+
+                    var fgColor = cellFg.IsDefault ? ToWpfColor(_theme.Foreground) : ToWpfColor(cellFg);
+                    bool bold = (attr.Flags & CellFlags.Bold) != 0;
+                    bool italic = (attr.Flags & CellFlags.Italic) != 0;
+                    bool dim = (attr.Flags & CellFlags.Dim) != 0;
+                    bool underline = (attr.Flags & CellFlags.Underline) != 0;
+                    bool strikethrough = (attr.Flags & CellFlags.Strikethrough) != 0;
+                    bool wide = IsWideChar(ch);
+
+                    // Style changed (or wide character): flush the current run first
+                    if (runStartCol >= 0 && (wide || fgColor != runFgColor || bold != runBold ||
+                        italic != runItalic || dim != runDim ||
+                        underline != runUnderline || strikethrough != runStrikethrough))
                     {
-                        // Empty cell — flush the current run
+                        FlushTextRun(dc, dpi, y, runStartCol, runFgColor, runBold, runItalic, runDim, runUnderline, runStrikethrough);
+                        runStartCol = -1;
+                    }
+
+                    if (runStartCol < 0)
+                    {
+                        runStartCol = c;
+                        runFgColor = fgColor;
+                        runBold = bold;
+                        runItalic = italic;
+                        runDim = dim;
+                        runUnderline = underline;
+                        runStrikethrough = strikethrough;
+                        _textRunBuffer.Clear();
+                        pendingSpaces = 0;
+                    }
+                    else if (pendingSpaces > 0)
+                    {
+                        _textRunBuffer.Append(' ', pendingSpaces);
+                        pendingSpaces = 0;
+                    }
+
+                    _textRunBuffer.Append(ch);
+
+                    // A wide character is drawn as its own run so later columns stay aligned
+                    if (wide)
+                    {
                         FlushTextRun(dc, dpi, y, runStartCol, runFgColor, runBold, runItalic, runDim, runUnderline, runStrikethrough);
                         runStartCol = -1;
                     }
                 }
 
-                // Flush final run for this row
+                // Flush final run for this row (trailing blanks are dropped)
                 if (runStartCol >= 0)
                     FlushTextRun(dc, dpi, y, runStartCol, runFgColor, runBold, runItalic, runDim, runUnderline, runStrikethrough);
             }
@@ -743,9 +888,10 @@ public class TerminalControl : FrameworkElement
                 if (callback(command))
                     return true;
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore handler failures to avoid breaking terminal input.
+                // Handler failures must not break terminal input; the command is sent to the shell.
+                Log.Debug($"Command interceptor failed: {ex.Message}");
             }
         }
 
@@ -775,12 +921,30 @@ public class TerminalControl : FrameworkElement
         bool shift = modifiers.HasFlag(ModifierKeys.Shift);
         bool alt = modifiers.HasFlag(ModifierKeys.Alt);
 
-        // Let application-level shortcuts bubble to MainWindow.
-        // Ctrl+Alt combos (pane focus), Ctrl+Tab (surface cycling),
-        // and Ctrl+Shift combos (split, zoom, search, etc.) are app-level.
+        // Application-level shortcuts are left unhandled so they bubble to MainWindow:
+        // Ctrl+Alt combos (pane focus), Alt+Arrow (pane navigation/resize), Ctrl+Tab (surface
+        // cycling) and Ctrl+Shift combos (tabs, split, zoom, search, ...).
+        bool arrow = e.Key is Key.Left or Key.Right or Key.Up or Key.Down;
         if (ctrl && alt) return;
-        if (ctrl && shift) return;
+        if (alt && arrow) return;
         if (ctrl && e.Key == Key.Tab) return;
+
+        // Windows Terminal style copy/paste. Other Ctrl+Shift chords belong to the app.
+        if (ctrl && shift && e.Key == Key.C)
+        {
+            CopySelectionToClipboard();
+            e.Handled = true;
+            return;
+        }
+
+        if (ctrl && shift && e.Key == Key.V)
+        {
+            PasteFromClipboard();
+            e.Handled = true;
+            return;
+        }
+
+        if (ctrl && shift) return;
 
         // Ctrl+Backspace: delete previous word (send Ctrl+W / unix-word-rubout)
         if (ctrl && e.Key == Key.Back)
@@ -929,8 +1093,9 @@ public class TerminalControl : FrameworkElement
                 || Clipboard.ContainsFileDropList()
                 || Clipboard.ContainsImage();
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Debug($"Clipboard unavailable: {ex.Message}");
             return false;
         }
     }
@@ -975,9 +1140,10 @@ public class TerminalControl : FrameworkElement
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore clipboard race/format exceptions and treat as unavailable.
+            // Clipboard races and unsupported formats are treated as "nothing to paste".
+            Log.Debug($"Clipboard read failed: {ex.Message}");
         }
 
         return false;
@@ -1001,8 +1167,9 @@ public class TerminalControl : FrameworkElement
 
             return fullPath;
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Debug($"Saving clipboard image failed: {ex.Message}");
             return null;
         }
     }
@@ -1028,8 +1195,9 @@ public class TerminalControl : FrameworkElement
                 || data.GetDataPresent(DataFormats.Bitmap)
                 || data.GetDataPresent("PNG");
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Debug($"Drag data inspection failed: {ex.Message}");
             return false;
         }
     }
@@ -1078,9 +1246,9 @@ public class TerminalControl : FrameworkElement
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore drag-data conversion failures.
+            Log.Debug($"Drop data conversion failed: {ex.Message}");
         }
 
         return false;
@@ -1160,6 +1328,28 @@ public class TerminalControl : FrameworkElement
 
     // --- Mouse input ---
 
+    /// <summary>
+    /// Opens a link from terminal output. Terminal text is untrusted, so only http and https are launched.
+    /// </summary>
+    private static void OpenHttpUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            Log.Debug("Ignored Ctrl+click on a link with a non-http(s) scheme");
+            return;
+        }
+
+        try
+        {
+            using var _ = Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"Failed to open link: {ex.Message}");
+        }
+    }
+
     protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
     {
         base.OnMouseLeftButtonDown(e);
@@ -1175,11 +1365,7 @@ public class TerminalControl : FrameworkElement
         // Ctrl+Click for URL opening
         if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && _hoveredUrl.HasValue)
         {
-            try
-            {
-                Process.Start(new ProcessStartInfo(_hoveredUrl.Value.url) { UseShellExecute = true });
-            }
-            catch { }
+            OpenHttpUrl(_hoveredUrl.Value.url);
             e.Handled = true;
             return;
         }
@@ -1543,9 +1729,7 @@ public class TerminalControl : FrameworkElement
     public void UpdateTheme(GhosttyTheme theme)
     {
         _theme = theme;
-        _typeface = new Typeface(new FontFamily(theme.FontFamily), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
-        _fontSize = theme.FontSize;
-        InvalidateRenderCaches();
+        ApplyFont(theme.FontFamily, theme.FontSize);
         CalculateCellSize();
         CalculateTerminalSize();
         RequestRender(System.Windows.Threading.DispatcherPriority.Render);
@@ -1570,14 +1754,13 @@ public class TerminalControl : FrameworkElement
     public void UpdateSettings(GhosttyTheme theme, string fontFamily, int fontSize)
     {
         _theme = theme;
-        _fontSize = fontSize;
 
         var settings = SettingsService.Current;
         _cursorStyle = settings.CursorStyle;
         _cursorBlink = settings.CursorBlink;
 
-        _typeface = new Typeface(new FontFamily(fontFamily), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
-        InvalidateRenderCaches();
+        ApplyFont(fontFamily, fontSize);
+        UpdateCursorBlink();
         CalculateCellSize();
         CalculateTerminalSize();
         RequestRender(System.Windows.Threading.DispatcherPriority.Render);
@@ -1592,11 +1775,7 @@ public class TerminalControl : FrameworkElement
     {
         var ctrl = (TerminalControl)d;
         if ((bool)e.NewValue)
-        {
             ctrl._cursorVisible = true;
-            if (ctrl._cursorBlink)
-                ctrl._cursorTimer?.Start();
-        }
         ctrl.RequestRender(System.Windows.Threading.DispatcherPriority.Render);
     }
 }
