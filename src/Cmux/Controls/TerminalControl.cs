@@ -1563,13 +1563,13 @@ public class TerminalControl : FrameworkElement
         menu.Items.Add(new Separator());
 
         // Split Right
-        var splitRight = new MenuItem { Header = "Split Right", InputGestureText = "Ctrl+D" };
+        var splitRight = new MenuItem { Header = "Split Right", InputGestureText = "Alt+Shift+=" };
         splitRight.Icon = MakeIcon("\uE745");
         splitRight.Click += (_, _) => SplitRequested?.Invoke(SplitDirection.Vertical);
         menu.Items.Add(splitRight);
 
         // Split Down
-        var splitDown = new MenuItem { Header = "Split Down", InputGestureText = "Ctrl+Shift+D" };
+        var splitDown = new MenuItem { Header = "Split Down", InputGestureText = "Alt+Shift+-" };
         splitDown.Icon = MakeIcon("\uE74B");
         splitDown.Click += (_, _) => SplitRequested?.Invoke(SplitDirection.Horizontal);
         menu.Items.Add(splitDown);

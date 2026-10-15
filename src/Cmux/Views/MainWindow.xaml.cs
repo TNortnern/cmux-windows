@@ -205,13 +205,16 @@ public partial class MainWindow : Window
         _lastAutoSaveSignature = ViewModel.GetLayoutSignature();
 
         // Monitor daemon connection changes
-        App.DaemonClient.Connected += () => Dispatcher.BeginInvoke(UpdateDaemonStatus);
-        App.DaemonClient.Disconnected += () => Dispatcher.BeginInvoke(UpdateDaemonStatus);
+        if (App.IsDaemonEnabled)
+        {
+            App.DaemonClient.Connected += () => Dispatcher.BeginInvoke(UpdateDaemonStatus);
+            App.DaemonClient.Disconnected += () => Dispatcher.BeginInvoke(UpdateDaemonStatus);
+        }
     }
 
     private void UpdateDaemonStatus()
     {
-        var connected = App.DaemonClient.IsConnected;
+        var connected = App.IsDaemonEnabled && App.DaemonClient.IsConnected;
         DaemonStatusDot.Fill = connected
             ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x34, 0xD3, 0x99)) // green
             : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x6B, 0x72, 0x80)); // gray

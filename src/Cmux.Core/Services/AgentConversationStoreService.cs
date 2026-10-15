@@ -36,8 +36,7 @@ public sealed class AgentConversationStoreService
     /// </summary>
     public AgentConversationStoreService(string? rootDirectory = null)
     {
-        _rootDir = rootDirectory ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux", "agent");
+        _rootDir = rootDirectory ?? Path.Combine(CmuxPaths.DataDirectory, "agent");
         _threadsDir = Path.Combine(_rootDir, "threads");
         _threadsIndexPath = Path.Combine(_rootDir, "threads.json");
     }

@@ -74,14 +74,17 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         _rootNode = surface.RootSplitNode;
         _focusedPaneId = surface.FocusedPaneId;
 
-        // Wire daemon events for session persistence
-        var daemon = App.DaemonClient;
-        daemon.RawOutputReceived += OnDaemonRawOutput;
-        daemon.CwdChanged += OnDaemonCwdChanged;
-        daemon.TitleChanged += OnDaemonTitleChanged;
-        daemon.SessionExited += OnDaemonSessionExited;
-        daemon.BellReceived += OnDaemonBellReceived;
-        daemon.Disconnected += OnDaemonDisconnected;
+        // Wire daemon events for session persistence (only when the daemon is enabled)
+        if (App.IsDaemonEnabled)
+        {
+            var daemon = App.DaemonClient;
+            daemon.RawOutputReceived += OnDaemonRawOutput;
+            daemon.CwdChanged += OnDaemonCwdChanged;
+            daemon.TitleChanged += OnDaemonTitleChanged;
+            daemon.SessionExited += OnDaemonSessionExited;
+            daemon.BellReceived += OnDaemonBellReceived;
+            daemon.Disconnected += OnDaemonDisconnected;
+        }
 
         // Command history is small text; load it now so the history UI works before sessions start.
         foreach (var leaf in _rootNode.GetLeaves())
@@ -369,6 +372,10 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
 
     public bool TryHandlePaneCommand(string paneId, string command)
     {
+        // Agent is opt-in: never touch (and so never create) the runtime when disabled.
+        if (!SettingsService.Current.Agent.Enabled)
+            return false;
+
         if (!_sessions.TryGetValue(paneId, out var session))
             return false;
 
@@ -420,7 +427,7 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
             var connect = App.DaemonConnectTask;
             bool daemonReady = connect.IsCompletedSuccessfully && connect.Result;
 
-            DaemonLog($"[StartSession:{paneId}] daemonReady={daemonReady}, IsConnected={App.DaemonClient.IsConnected}, TaskStatus={connect.Status}");
+            DaemonLog($"[StartSession:{paneId}] daemonReady={daemonReady}, TaskStatus={connect.Status}");
 
             if (daemonReady)
             {
@@ -829,14 +836,17 @@ public partial class SurfaceViewModel : ObservableObject, IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        // Unwire daemon events
-        var daemon = App.DaemonClient;
-        daemon.RawOutputReceived -= OnDaemonRawOutput;
-        daemon.CwdChanged -= OnDaemonCwdChanged;
-        daemon.TitleChanged -= OnDaemonTitleChanged;
-        daemon.SessionExited -= OnDaemonSessionExited;
-        daemon.BellReceived -= OnDaemonBellReceived;
-        daemon.Disconnected -= OnDaemonDisconnected;
+        // Unwire daemon events (only when the daemon is enabled)
+        if (App.IsDaemonEnabled)
+        {
+            var daemon = App.DaemonClient;
+            daemon.RawOutputReceived -= OnDaemonRawOutput;
+            daemon.CwdChanged -= OnDaemonCwdChanged;
+            daemon.TitleChanged -= OnDaemonTitleChanged;
+            daemon.SessionExited -= OnDaemonSessionExited;
+            daemon.BellReceived -= OnDaemonBellReceived;
+            daemon.Disconnected -= OnDaemonDisconnected;
+        }
 
         // Local sessions are stopped; daemon sessions are deliberately left running.
         foreach (var session in _sessions.Values)

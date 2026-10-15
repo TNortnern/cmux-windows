@@ -741,6 +741,12 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <Grid.RowDefinitions>
+                                    <RowDefinition Height="30" />
+                                    <RowDefinition Height="28" />
+                                    <RowDefinition Height="28" />
+                                    <RowDefinition Height="28" />
+                                    <RowDefinition Height="28" />
+                                    <RowDefinition Height="30" />
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
@@ -748,10 +754,14 @@
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
+                                    <RowDefinition Height="30" />
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
+                                    <RowDefinition Height="30" />
                                     <RowDefinition Height="28" />
+                                    <RowDefinition Height="28" />
+                                    <RowDefinition Height="30" />
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
                                     <RowDefinition Height="28" />
@@ -764,114 +774,175 @@
                                     <RowDefinition Height="28" />
                                 </Grid.RowDefinitions>
 
-                                <!-- Workspaces -->
-                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Ctrl+N" FontWeight="SemiBold"
-                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="0" Grid.Column="1" Text="New workspace"
-                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="Tabs" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Bottom" Margin="0,0,0,4" />
 
-                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Ctrl+1-8" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Ctrl+Shift+T" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="1" Grid.Column="1" Text="Jump to workspace"
+
+                                <TextBlock Grid.Row="1" Grid.Column="1" Text="New tab (in current pane's folder)"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
                                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Ctrl+Shift+W" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="2" Grid.Column="1" Text="Close workspace"
+
+                                <TextBlock Grid.Row="2" Grid.Column="1" Text="Close pane (closes tab if last pane)"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <!-- Surfaces -->
-                                <TextBlock Grid.Row="3" Grid.Column="0" Text="Ctrl+T" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="3" Grid.Column="0" Text="Ctrl+Tab / Ctrl+Shift+Tab" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="3" Grid.Column="1" Text="New surface"
+
+                                <TextBlock Grid.Row="3" Grid.Column="1" Text="Next / previous tab"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="4" Grid.Column="0" Text="Ctrl+W" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="4" Grid.Column="0" Text="Ctrl+1..8 / Ctrl+9" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="4" Grid.Column="1" Text="Close surface"
+
+                                <TextBlock Grid.Row="4" Grid.Column="1" Text="Go to tab N / last tab"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="5" Grid.Column="0" Text="Ctrl+Tab" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="5" Grid.ColumnSpan="2" Text="Panes" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Bottom" Margin="0,0,0,4" />
+
+                                <TextBlock Grid.Row="6" Grid.Column="0" Text="Alt+Shift+=" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="5" Grid.Column="1" Text="Next surface"
+
+                                <TextBlock Grid.Row="6" Grid.Column="1" Text="Split right (in current pane's folder)"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="6" Grid.Column="0" Text="Ctrl+Shift+Tab" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="7" Grid.Column="0" Text="Alt+Shift+-" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="6" Grid.Column="1" Text="Previous surface"
+
+                                <TextBlock Grid.Row="7" Grid.Column="1" Text="Split down (in current pane's folder)"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <!-- Panes -->
-                                <TextBlock Grid.Row="7" Grid.Column="0" Text="Ctrl+D" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="8" Grid.Column="0" Text="Alt+Shift+D" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="7" Grid.Column="1" Text="Split right"
+
+                                <TextBlock Grid.Row="8" Grid.Column="1" Text="Split along longer side"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="8" Grid.Column="0" Text="Ctrl+Shift+D" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="9" Grid.Column="0" Text="Alt+Arrow" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="8" Grid.Column="1" Text="Split down"
+
+                                <TextBlock Grid.Row="9" Grid.Column="1" Text="Focus pane in direction"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="9" Grid.Column="0" Text="Ctrl+Alt+Arrow" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="10" Grid.Column="0" Text="Alt+Shift+Arrow" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="9" Grid.Column="1" Text="Focus pane directionally"
+
+                                <TextBlock Grid.Row="10" Grid.Column="1" Text="Resize pane"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="10" Grid.Column="0" Text="Ctrl+Shift+Z" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="11" Grid.Column="0" Text="Ctrl+Shift+Z" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="10" Grid.Column="1" Text="Zoom pane toggle"
+
+                                <TextBlock Grid.Row="11" Grid.Column="1" Text="Zoom pane toggle"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <!-- Terminal -->
-                                <TextBlock Grid.Row="11" Grid.Column="0" Text="Ctrl+Backspace" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="12" Grid.Column="0" Text="Ctrl+Shift+E" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="11" Grid.Column="1" Text="Delete previous word"
+
+                                <TextBlock Grid.Row="12" Grid.Column="1" Text="Equalize panes"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <!-- View -->
-                                <TextBlock Grid.Row="12" Grid.Column="0" Text="Ctrl+B" FontWeight="SemiBold"
-                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="12" Grid.Column="1" Text="Toggle sidebar"
-                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="13" Grid.ColumnSpan="2" Text="Terminal" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Bottom" Margin="0,0,0,4" />
 
-                                <TextBlock Grid.Row="13" Grid.Column="0" Text="Ctrl+I" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="14" Grid.Column="0" Text="Ctrl+Shift+C / Ctrl+Shift+V" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="13" Grid.Column="1" Text="Notification panel"
-                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="14" Grid.Column="0" Text="Ctrl+Shift+U" FontWeight="SemiBold"
-                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="14" Grid.Column="1" Text="Jump to latest unread"
+                                <TextBlock Grid.Row="14" Grid.Column="1" Text="Copy / paste"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
                                 <TextBlock Grid.Row="15" Grid.Column="0" Text="Ctrl+Shift+F" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
                                 <TextBlock Grid.Row="15" Grid.Column="1" Text="Search in terminal"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="16" Grid.Column="0" Text="Ctrl+Shift+P" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="16" Grid.Column="0" Text="Ctrl+Backspace" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="16" Grid.Column="1" Text="Command palette"
+
+                                <TextBlock Grid.Row="16" Grid.Column="1" Text="Delete previous word"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="17" Grid.Column="0" Text="Ctrl+Shift+A" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="17" Grid.ColumnSpan="2" Text="Workspaces" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Bottom" Margin="0,0,0,4" />
+
+                                <TextBlock Grid.Row="18" Grid.Column="0" Text="Ctrl+Shift+N" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="17" Grid.Column="1" Text="Toggle agent chat"
+
+                                <TextBlock Grid.Row="18" Grid.Column="1" Text="New workspace"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="18" Grid.Column="0" Text="Ctrl+Shift+L" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="19" Grid.Column="0" Text="Ctrl+Alt+1..9" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="18" Grid.Column="1" Text="Open command logs"
+
+                                <TextBlock Grid.Row="19" Grid.Column="1" Text="Jump to workspace"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="19" Grid.Column="0" Text="Ctrl+Alt+H" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="20" Grid.ColumnSpan="2" Text="View and tools" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Bottom" Margin="0,0,0,4" />
+
+                                <TextBlock Grid.Row="21" Grid.Column="0" Text="Ctrl+Shift+P" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="19" Grid.Column="1" Text="Open command history picker"
+
+                                <TextBlock Grid.Row="21" Grid.Column="1" Text="Command palette"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
 
-                                <TextBlock Grid.Row="20" Grid.Column="0" Text="Ctrl+Shift+V" FontWeight="SemiBold"
+                                <TextBlock Grid.Row="22" Grid.Column="0" Text="Ctrl+Shift+B" FontWeight="SemiBold"
                                            Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
-                                <TextBlock Grid.Row="20" Grid.Column="1" Text="Open session vault"
+
+                                <TextBlock Grid.Row="22" Grid.Column="1" Text="Toggle sidebar"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="23" Grid.Column="0" Text="Ctrl+Shift+I" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="23" Grid.Column="1" Text="Notification panel"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="24" Grid.Column="0" Text="Ctrl+Shift+U" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="24" Grid.Column="1" Text="Jump to latest unread"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="25" Grid.Column="0" Text="Ctrl+Shift+S" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="25" Grid.Column="1" Text="Session vault"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="26" Grid.Column="0" Text="Ctrl+Shift+L" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="26" Grid.Column="1" Text="Command logs"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="27" Grid.Column="0" Text="Ctrl+Shift+H" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="27" Grid.Column="1" Text="Insert last command"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="28" Grid.Column="0" Text="Ctrl+Alt+H" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="28" Grid.Column="1" Text="Command history picker"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="29" Grid.Column="0" Text="Ctrl+Shift+A" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="29" Grid.Column="1" Text="Agent chat (when enabled)"
+                                           Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="30" Grid.Column="0" Text="Ctrl+," FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" FontSize="13" VerticalAlignment="Center" />
+
+                                <TextBlock Grid.Row="30" Grid.Column="1" Text="Settings"
                                            Foreground="{StaticResource ForegroundDimBrush}" FontSize="13" VerticalAlignment="Center" />
                             </Grid>
                         </Border>

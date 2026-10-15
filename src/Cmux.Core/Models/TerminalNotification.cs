@@ -21,10 +21,3 @@ public record TerminalNotification
     public DateTime Timestamp { get; init; } = DateTime.UtcNow;
     public NotificationSource Source { get; init; }
 }
-
-public record AppNotification
-{
-    public required string WorkspaceName { get; init; }
-    public required string SurfaceName { get; init; }
-    public required TerminalNotification Notification { get; init; }
-}

@@ -26,6 +26,8 @@ public partial class App : Application
     public static DaemonClient DaemonClient => _daemonClient.Value;
     public static bool IsDaemonClientCreated => _daemonClient.IsValueCreated;
     public static Task<bool> DaemonConnectTask { get; private set; } = Task.FromResult(false);
+    /// <summary>Whether this run uses the session daemon (read once at startup; changing it needs a restart).</summary>
+    public static bool IsDaemonEnabled { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -51,7 +53,8 @@ public partial class App : Application
         PipeServer = _pipeServer;
         _pipeServer.Start();
 
-        if (SettingsService.Current.UseSessionDaemon)
+        IsDaemonEnabled = SettingsService.Current.UseSessionDaemon;
+        if (IsDaemonEnabled)
         {
             // Opt-in daemon: try an existing daemon first, then start one if needed.
             // Sessions wait for this task before deciding local vs daemon mode.

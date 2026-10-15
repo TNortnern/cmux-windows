@@ -51,7 +51,41 @@ Keep the three files in the same folder. Add that folder to `PATH` if you want `
 
 ## Keyboard shortcuts
 
-<!-- KEYMAP -->
+| Shortcut | Action |
+|---|---|
+| **Tabs** | |
+| `Ctrl+Shift+T` | New tab (in current pane's folder) |
+| `Ctrl+Shift+W` | Close pane (closes tab if last pane) |
+| `Ctrl+Tab / Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+1..8 / Ctrl+9` | Go to tab N / last tab |
+| **Panes** | |
+| `Alt+Shift+=` | Split right (in current pane's folder) |
+| `Alt+Shift+-` | Split down (in current pane's folder) |
+| `Alt+Shift+D` | Split along longer side |
+| `Alt+Arrow` | Focus pane in direction |
+| `Alt+Shift+Arrow` | Resize pane |
+| `Ctrl+Shift+Z` | Zoom pane toggle |
+| `Ctrl+Shift+E` | Equalize panes |
+| **Terminal** | |
+| `Ctrl+Shift+C / Ctrl+Shift+V` | Copy / paste |
+| `Ctrl+Shift+F` | Search in terminal |
+| `Ctrl+Backspace` | Delete previous word |
+| **Workspaces** | |
+| `Ctrl+Shift+N` | New workspace |
+| `Ctrl+Alt+1..9` | Jump to workspace |
+| **View and tools** | |
+| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+Shift+B` | Toggle sidebar |
+| `Ctrl+Shift+I` | Notification panel |
+| `Ctrl+Shift+U` | Jump to latest unread |
+| `Ctrl+Shift+S` | Session vault |
+| `Ctrl+Shift+L` | Command logs |
+| `Ctrl+Shift+H` | Insert last command |
+| `Ctrl+Alt+H` | Command history picker |
+| `Ctrl+Shift+A` | Agent chat (when enabled) |
+| `Ctrl+,` | Settings |
+
+All shortcuts work while a terminal has focus. Ctrl+letter chords are left for your shell (Ctrl+W, Ctrl+D, etc.).
 
 ---
 
