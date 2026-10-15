@@ -12,11 +12,16 @@ namespace Cmux.Controls;
 /// <summary>
 /// Recursively renders a SplitNode tree as nested Grid panels with
 /// GridSplitters for resizable dividers. Leaf nodes contain TerminalControl instances.
+/// Terminal controls are kept per pane while shown; controls for panes that are no longer
+/// shown (closed, zoomed away, other surface, unloaded) are detached so they stop working.
 /// </summary>
 public class SplitPaneContainer : ContentControl
 {
     private SurfaceViewModel? _surface;
     private readonly Dictionary<string, TerminalControl> _terminalCache = [];
+    private readonly HashSet<string> _shownPaneIds = [];
+    private readonly Dictionary<string, (TerminalSession Session, Action<string> Handler)> _titleSubscriptions = [];
+    private bool _needsRebuildOnLoad;
 
     public event Action? SearchRequested;
 
@@ -30,6 +35,8 @@ public class SplitPaneContainer : ContentControl
     {
         Background = Brushes.Transparent;
         DataContextChanged += OnDataContextChanged;
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
@@ -39,9 +46,8 @@ public class SplitPaneContainer : ContentControl
             oldSurface.PropertyChanged -= OnSurfacePropertyChanged;
         }
 
-        // Clear terminal cache when switching surfaces/workspaces
-        // This prevents reusing terminals from a different workspace
-        _terminalCache.Clear();
+        // Switching surfaces/workspaces: release the previous surface's terminals so they are never reused
+        DetachAll();
 
         _surface = e.NewValue as SurfaceViewModel;
 
@@ -54,6 +60,19 @@ public class SplitPaneContainer : ContentControl
         {
             Content = null;
         }
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_needsRebuildOnLoad)
+            Rebuild();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        // Removed from the window: stop all terminal work; rebuild when shown again.
+        DetachAll();
+        _needsRebuildOnLoad = _surface != null;
     }
 
     private void OnSurfacePropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -94,6 +113,10 @@ public class SplitPaneContainer : ContentControl
     {
         if (_surface == null) return;
 
+        _needsRebuildOnLoad = false;
+        UnsubscribeTitles();
+        _shownPaneIds.Clear();
+
         // Zoom mode: show only the focused pane full-size
         if (_surface.IsZoomed && _surface.FocusedPaneId != null)
         {
@@ -101,11 +124,58 @@ public class SplitPaneContainer : ContentControl
             if (focusedNode != null)
             {
                 Content = BuildLeaf(focusedNode);
+                PruneTerminalCache();
                 return;
             }
         }
 
         Content = BuildNode(_surface.RootNode);
+        PruneTerminalCache();
+    }
+
+    /// <summary>Detaches and drops cached terminals for panes that the rebuilt tree no longer shows.</summary>
+    private void PruneTerminalCache()
+    {
+        foreach (var paneId in _terminalCache.Keys.Where(id => !_shownPaneIds.Contains(id)).ToList())
+        {
+            _terminalCache[paneId].Detach();
+            _terminalCache.Remove(paneId);
+        }
+    }
+
+    /// <summary>Detaches every cached terminal and forgets all pane state.</summary>
+    private void DetachAll()
+    {
+        UnsubscribeTitles();
+
+        foreach (var terminal in _terminalCache.Values)
+            terminal.Detach();
+
+        _terminalCache.Clear();
+        _shownPaneIds.Clear();
+    }
+
+    private void UnsubscribeTitles()
+    {
+        foreach (var (session, handler) in _titleSubscriptions.Values)
+            session.TitleChanged -= handler;
+
+        _titleSubscriptions.Clear();
+    }
+
+    private void SubscribeTitle(string paneId, TerminalSession session, TextBlock titleText)
+    {
+        Action<string> handler = sessionTitle =>
+        {
+            // The session raises TitleChanged on its reader thread
+            Dispatcher.BeginInvoke(() =>
+            {
+                titleText.Text = _surface?.GetPaneTitle(paneId, sessionTitle) ?? "Terminal";
+            });
+        };
+
+        session.TitleChanged += handler;
+        _titleSubscriptions[paneId] = (session, handler);
     }
 
     private UIElement BuildNode(SplitNode node)
@@ -124,11 +194,13 @@ public class SplitPaneContainer : ContentControl
             return new Border { Background = Brushes.Transparent };
 
         var paneId = node.PaneId; // Capture for closures
+        _shownPaneIds.Add(paneId);
 
         // Reuse cached terminal if available (preserves session and scroll position)
         if (!_terminalCache.TryGetValue(paneId, out var terminal))
         {
             terminal = new TerminalControl();
+            ApplyCurrentSettings(terminal);
             _terminalCache[paneId] = terminal;
         }
         else
@@ -136,7 +208,7 @@ public class SplitPaneContainer : ContentControl
             // Detach from old parent before reusing
             // Terminal could be inside DockPanel (with header) or Border
             var oldParent = System.Windows.Media.VisualTreeHelper.GetParent(terminal) as FrameworkElement;
-            
+
             if (oldParent is DockPanel dockPanel)
             {
                 dockPanel.Children.Remove(terminal);
@@ -145,7 +217,7 @@ public class SplitPaneContainer : ContentControl
             {
                 border.Child = null;
             }
-            
+
             // Clear old event handlers to prevent memory leaks and wrong callbacks
             terminal.ClearEventHandlers();
         }
@@ -170,6 +242,8 @@ public class SplitPaneContainer : ContentControl
         var session = _surface?.GetSession(paneId);
         if (session != null)
             terminal.AttachSession(session);
+        else
+            terminal.Detach();
 
         // Get pane title (custom name takes precedence over shell title)
         var title = _surface?.GetPaneTitle(paneId, session?.Title) ?? "Terminal";
@@ -230,7 +304,7 @@ public class SplitPaneContainer : ContentControl
         };
         Grid.SetColumn(focusIndicator, 0);
 
-        // Title text
+        // Title text (updated live from the session's TitleChanged)
         var titleText = new TextBlock
         {
             Text = title,
@@ -241,10 +315,13 @@ public class SplitPaneContainer : ContentControl
         };
         Grid.SetColumn(titleText, 1);
 
+        if (session != null)
+            SubscribeTitle(paneId, session, titleText);
+
         // Close button
         var closeButton = new Button
         {
-            Content = "\u2715",
+            Content = "✕",
             FontSize = 10,
             Width = 18,
             Height = 18,
@@ -276,6 +353,15 @@ public class SplitPaneContainer : ContentControl
         };
     }
 
+    /// <summary>
+    /// New terminal controls start from the Ghostty config; apply the app's current theme and font
+    /// so a control recreated after zoom or a surface switch looks like the others.
+    /// </summary>
+    private static void ApplyCurrentSettings(TerminalControl terminal)
+    {
+        var settings = SettingsService.Current;
+        terminal.UpdateSettings(TerminalThemes.GetEffective(settings), settings.FontFamily, settings.FontSize);
+    }
 
     private UIElement BuildSplit(SplitNode node)
     {
@@ -311,6 +397,8 @@ public class SplitPaneContainer : ContentControl
                 Background = FindResource("DividerBrush") as Brush ?? Brushes.Gray,
                 Cursor = System.Windows.Input.Cursors.SizeWE,
             };
+            splitter.DragCompleted += (_, _) =>
+                node.SplitRatio = RatioFromSizes(grid.ColumnDefinitions[0].ActualWidth, grid.ColumnDefinitions[2].ActualWidth, node.SplitRatio);
             Grid.SetColumn(splitter, 1);
             grid.Children.Add(splitter);
 
@@ -352,6 +440,8 @@ public class SplitPaneContainer : ContentControl
                 Background = FindResource("DividerBrush") as Brush ?? Brushes.Gray,
                 Cursor = System.Windows.Input.Cursors.SizeNS,
             };
+            splitter.DragCompleted += (_, _) =>
+                node.SplitRatio = RatioFromSizes(grid.RowDefinitions[0].ActualHeight, grid.RowDefinitions[2].ActualHeight, node.SplitRatio);
             Grid.SetRow(splitter, 1);
             grid.Children.Add(splitter);
 
@@ -364,6 +454,16 @@ public class SplitPaneContainer : ContentControl
         }
 
         return grid;
+    }
+
+    /// <summary>
+    /// Converts the measured sizes of the two panes after a drag into a split ratio, so the
+    /// layout survives the next rebuild. Bounded the same way as <see cref="SplitNode.SplitRatio"/> changes.
+    /// </summary>
+    private static double RatioFromSizes(double first, double second, double fallback)
+    {
+        double total = first + second;
+        return total > 0 ? Math.Clamp(first / total, 0.1, 0.9) : fallback;
     }
 
     /// <summary>
