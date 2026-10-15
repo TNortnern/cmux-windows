@@ -6,11 +6,9 @@ namespace Cmux.Core.Services;
 
 public sealed class AgentConversationStoreService
 {
-    private static readonly string RootDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux", "agent");
-
-    private static readonly string ThreadsDir = Path.Combine(RootDir, "threads");
-    private static readonly string ThreadsIndexPath = Path.Combine(RootDir, "threads.json");
+    // Transcripts up to this size are read whole; larger ones only have their tail read.
+    private const long MaxWholeFileReadBytes = 4 * 1024 * 1024;
+    private const int TailReadBytes = 4 * 1024 * 1024;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -26,25 +24,35 @@ public sealed class AgentConversationStoreService
 
     private readonly object _lock = new();
     private readonly Dictionary<string, AgentConversationThread> _threads = new(StringComparer.Ordinal);
+    private readonly string _rootDir;
+    private readonly string _threadsDir;
+    private readonly string _threadsIndexPath;
+    private bool _indexLoaded;
 
     public event Action? StoreChanged;
 
-    public AgentConversationStoreService()
+    /// <summary>
+    /// Constructing the store does no IO. The index is read on first use and directories are created on first write.
+    /// </summary>
+    public AgentConversationStoreService(string? rootDirectory = null)
     {
-        EnsureStorage();
-        LoadThreadsIndex();
+        _rootDir = rootDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux", "agent");
+        _threadsDir = Path.Combine(_rootDir, "threads");
+        _threadsIndexPath = Path.Combine(_rootDir, "threads.json");
     }
 
     public string GetRootDirectoryPath()
     {
         EnsureStorage();
-        return RootDir;
+        return _rootDir;
     }
 
     public AgentConversationThread CreateThread(string workspaceId, string surfaceId, string paneId, string agentName)
     {
         lock (_lock)
         {
+            EnsureLoaded();
             EnsureStorage();
 
             var createdAt = DateTime.UtcNow;
@@ -71,6 +79,7 @@ public sealed class AgentConversationStoreService
     {
         lock (_lock)
         {
+            EnsureLoaded();
             if (!_threads.TryGetValue(threadId, out var thread))
                 return null;
 
@@ -82,6 +91,7 @@ public sealed class AgentConversationStoreService
     {
         lock (_lock)
         {
+            EnsureLoaded();
             var filterByWorkspace = !string.IsNullOrWhiteSpace(workspaceId);
             var filterBySurface = !string.IsNullOrWhiteSpace(surfaceId);
             var filterByPane = !string.IsNullOrWhiteSpace(paneId);
@@ -105,6 +115,7 @@ public sealed class AgentConversationStoreService
             if (string.IsNullOrWhiteSpace(trimmed))
                 return GetThreads(workspaceId, surfaceId, paneId, maxEntries);
 
+            EnsureLoaded();
             var filterByWorkspace = !string.IsNullOrWhiteSpace(workspaceId);
             var filterBySurface = !string.IsNullOrWhiteSpace(surfaceId);
             var filterByPane = !string.IsNullOrWhiteSpace(paneId);
@@ -123,6 +134,7 @@ public sealed class AgentConversationStoreService
         }
     }
 
+    /// <summary>Returns the newest <paramref name="maxEntries"/> messages. Large transcripts are read from their tail only.</summary>
     public IReadOnlyList<AgentConversationMessage> GetMessages(string threadId, int maxEntries = 1000)
     {
         lock (_lock)
@@ -150,6 +162,7 @@ public sealed class AgentConversationStoreService
     {
         lock (_lock)
         {
+            EnsureLoaded();
             EnsureStorage();
 
             if (message == null)
@@ -236,40 +249,48 @@ public sealed class AgentConversationStoreService
         };
     }
 
-    private static string GetThreadMessagesPath(string threadId)
+    private string GetThreadMessagesPath(string threadId)
     {
-        return Path.Combine(ThreadsDir, $"{threadId}.jsonl");
+        return Path.Combine(_threadsDir, $"{threadId}.jsonl");
     }
 
     private void EnsureStorage()
     {
-        Directory.CreateDirectory(RootDir);
-        Directory.CreateDirectory(ThreadsDir);
+        Directory.CreateDirectory(_rootDir);
+        Directory.CreateDirectory(_threadsDir);
+    }
+
+    /// <summary>Reads threads.json on first use. Callers must hold <see cref="_lock"/>.</summary>
+    private void EnsureLoaded()
+    {
+        if (_indexLoaded)
+            return;
+
+        _indexLoaded = true;
+        LoadThreadsIndex();
     }
 
     private void LoadThreadsIndex()
     {
-        lock (_lock)
-        {
-            _threads.Clear();
-            if (!File.Exists(ThreadsIndexPath))
-                return;
+        _threads.Clear();
+        if (!File.Exists(_threadsIndexPath))
+            return;
 
-            try
+        try
+        {
+            var json = File.ReadAllText(_threadsIndexPath, Encoding.UTF8);
+            var list = JsonSerializer.Deserialize<List<AgentConversationThread>>(json, JsonOptions) ?? [];
+            foreach (var t in list)
             {
-                var json = File.ReadAllText(ThreadsIndexPath, Encoding.UTF8);
-                var list = JsonSerializer.Deserialize<List<AgentConversationThread>>(json, JsonOptions) ?? [];
-                foreach (var t in list)
-                {
-                    if (string.IsNullOrWhiteSpace(t.Id))
-                        continue;
-                    _threads[t.Id] = t;
-                }
+                if (string.IsNullOrWhiteSpace(t.Id))
+                    continue;
+                _threads[t.Id] = t;
             }
-            catch
-            {
-                // Ignore load failures and start with an empty index.
-            }
+        }
+        catch (Exception ex)
+        {
+            // Start with an empty index rather than failing the agent; the file is rewritten on the next change.
+            Log.Debug($"[agent] threads index load failed: {ex.GetType().Name}");
         }
     }
 
@@ -280,20 +301,35 @@ public sealed class AgentConversationStoreService
             .ToList();
 
         var json = JsonSerializer.Serialize(list, JsonOptions);
-        File.WriteAllText(ThreadsIndexPath, json, Encoding.UTF8);
+        File.WriteAllText(_threadsIndexPath, json, Encoding.UTF8);
     }
 
     private void NotifyChanged()
     {
-        try { StoreChanged?.Invoke(); } catch { }
+        try { StoreChanged?.Invoke(); }
+        catch (Exception ex) { Log.Debug($"[agent] store change handler failed: {ex.GetType().Name}"); }
     }
 
     private static void ReadMessagesFromFile(string filePath, List<AgentConversationMessage> output)
     {
-        var bytes = File.ReadAllBytes(filePath);
-        if (bytes.Length == 0)
+        using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.SequentialScan);
+        if (stream.Length == 0)
             return;
 
+        if (stream.Length > MaxWholeFileReadBytes)
+        {
+            ReadTailLines(stream, output);
+            return;
+        }
+
+        var bytes = new byte[stream.Length];
+        stream.ReadExactly(bytes);
+        ParseWholeFile(bytes, filePath, output);
+    }
+
+    /// <summary>Parses a transcript that is small enough to hold in memory. Accepts legacy multi-line JSON.</summary>
+    private static void ParseWholeFile(byte[] bytes, string filePath, List<AgentConversationMessage> output)
+    {
         ReadOnlySpan<byte> payload = bytes;
         if (payload.Length >= 3 && payload[0] == 0xEF && payload[1] == 0xBB && payload[2] == 0xBF)
             payload = payload[3..];
@@ -321,29 +357,54 @@ public sealed class AgentConversationStoreService
                     output.Add(msg);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            // Malformed legacy content: fall back to line-by-line parsing.
+            Log.Debug($"[agent] transcript parse fallback: {ex.GetType().Name}");
             output.Clear();
+            ParseLines(File.ReadLines(filePath, Encoding.UTF8), output);
+        }
+    }
 
-            // Fallback for legacy malformed content.
-            foreach (var line in File.ReadLines(filePath, Encoding.UTF8))
+    /// <summary>Reads only the last window of a large transcript. The first, possibly partial, line is dropped.</summary>
+    private static void ReadTailLines(FileStream stream, List<AgentConversationMessage> output)
+    {
+        var start = Math.Max(0, stream.Length - TailReadBytes);
+        stream.Seek(start, SeekOrigin.Begin);
+
+        var buffer = new byte[stream.Length - start];
+        stream.ReadExactly(buffer);
+
+        int offset = 0;
+        if (start > 0)
+        {
+            int newline = Array.IndexOf(buffer, (byte)'\n');
+            if (newline < 0)
+                return;
+            offset = newline + 1;
+        }
+
+        var text = Encoding.UTF8.GetString(buffer, offset, buffer.Length - offset);
+        ParseLines(text.Split('\n'), output);
+    }
+
+    private static void ParseLines(IEnumerable<string> lines, List<AgentConversationMessage> output)
+    {
+        foreach (var line in lines)
+        {
+            var normalizedLine = line.Trim().TrimStart('﻿');
+            if (normalizedLine.Length == 0)
+                continue;
+
+            try
             {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-
-                try
-                {
-                    var normalizedLine = line.TrimStart('\uFEFF');
-                    if (string.IsNullOrWhiteSpace(normalizedLine))
-                        continue;
-                    var msg = JsonSerializer.Deserialize<AgentConversationMessage>(normalizedLine, JsonLineOptions);
-                    if (msg != null)
-                        output.Add(msg);
-                }
-                catch
-                {
-                    // Ignore malformed lines.
-                }
+                var msg = JsonSerializer.Deserialize<AgentConversationMessage>(normalizedLine, JsonLineOptions);
+                if (msg != null)
+                    output.Add(msg);
+            }
+            catch (JsonException)
+            {
+                // Skip malformed lines; a partial write can leave one behind.
             }
         }
     }
