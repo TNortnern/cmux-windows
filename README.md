@@ -40,7 +40,10 @@ Keep the three files in the same folder. Add that folder to `PATH` if you want `
 - **Split panes**, right or down, with keyboard focus movement and zoom.
 - **New tabs and splits open in the current directory.** This works through shell integration:
   - PowerShell and `cmd.exe`: cmux installs a prompt hook that reports the directory (OSC 9;9).
-  - bash and WSL: directory changes are reported with OSC 7.
+  - `cmd.exe` also works without the hook, because cmux can read its live directory from the process.
+  - Git Bash: add this to `~/.bashrc` so the prompt reports a Windows path:
+    `PROMPT_COMMAND='printf "\e]9;9;%s\e\\" "$(cygpath -w "$PWD")"'`
+  - WSL: Linux paths are not Windows paths, so a split from a WSL pane opens in your Windows home directory.
   - Other shells still work; new tabs just start in the configured directory.
 - **Notifications** from coding agents (OSC 9, 99, 777) with unread tracking and Windows toast alerts.
 - **Command palette**, search, snippets, and command history.

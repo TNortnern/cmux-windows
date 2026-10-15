@@ -113,4 +113,5 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}  # no checkout in this job, so gh cannot infer the repo
         run: gh release create "${GITHUB_REF_NAME}" dist/* --title "cmux windows ${GITHUB_REF_NAME}" --generate-notes
