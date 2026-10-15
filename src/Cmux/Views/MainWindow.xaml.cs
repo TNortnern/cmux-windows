@@ -62,11 +62,34 @@ public partial class MainWindow : Window
         OnSettingsChanged();
 
         ViewModel.PropertyChanged += ViewModel_PropertyChanged;
-        App.AgentRuntime.RuntimeUpdated += OnAgentRuntimeUpdated;
-        App.AgentConversationStore.StoreChanged += OnAgentConversationStoreChanged;
         AgentMessagesList.ItemsSource = _visibleThreadMessages;
         UpdateAgentPanelLayout();
-        RefreshAgentThreads();
+        // Agent services are not touched here: they are created only when the agent is enabled and its UI is used.
+        if (ViewModel.AgentPanelVisible)
+            RefreshAgentThreads();
+    }
+
+    private static bool IsAgentEnabled => Cmux.Core.Config.SettingsService.Current.Agent?.Enabled == true;
+
+    private bool _agentEventsSubscribed;
+
+    private void EnsureAgentEventsSubscribed()
+    {
+        if (_agentEventsSubscribed || !IsAgentEnabled)
+            return;
+
+        _agentEventsSubscribed = true;
+        App.AgentRuntime.RuntimeUpdated += OnAgentRuntimeUpdated;
+        App.AgentConversationStore.StoreChanged += OnAgentConversationStoreChanged;
+    }
+
+    private void ShowAgentDisabledState()
+    {
+        _agentThreadViews = [];
+        AgentThreadsList.ItemsSource = _agentThreadViews;
+        _selectedAgentThreadId = null;
+        LoadAgentMessages("");
+        AgentStatusText.Text = "Agent is disabled. Enable it in Settings -> Agent.";
     }
 
     private void OnSettingsChanged()
@@ -220,8 +243,11 @@ public partial class MainWindow : Window
     {
         _uiRefreshTimer.Stop();
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
-        App.AgentRuntime.RuntimeUpdated -= OnAgentRuntimeUpdated;
-        App.AgentConversationStore.StoreChanged -= OnAgentConversationStoreChanged;
+        if (_agentEventsSubscribed)
+        {
+            App.AgentRuntime.RuntimeUpdated -= OnAgentRuntimeUpdated;
+            App.AgentConversationStore.StoreChanged -= OnAgentConversationStoreChanged;
+        }
         ViewModel.SaveSession(Left, Top, Width, Height, WindowState == WindowState.Maximized);
     }
 
@@ -800,6 +826,9 @@ public partial class MainWindow : Window
 
     private void RefreshAgentThreadsIfContextChanged()
     {
+        if (!IsAgentEnabled)
+            return;
+
         var contextKey = ViewModel.SelectedWorkspace?.Workspace.Id ?? "";
 
         if (string.Equals(contextKey, _lastAgentContextKey, StringComparison.Ordinal))
@@ -811,6 +840,13 @@ public partial class MainWindow : Window
 
     private void RefreshAgentThreads()
     {
+        if (!IsAgentEnabled)
+        {
+            ShowAgentDisabledState();
+            return;
+        }
+
+        EnsureAgentEventsSubscribed();
         var context = GetCurrentPaneContext();
         var workspaceId = ViewModel.SelectedWorkspace?.Workspace.Id ?? "";
         var query = AgentThreadSearchBox.Text?.Trim() ?? "";
@@ -1430,9 +1466,17 @@ public partial class MainWindow : Window
 
     private void AgentNewThread_Click(object sender, RoutedEventArgs e)
     {
+        if (!IsAgentEnabled)
+        {
+            ShowAgentDisabledState();
+            return;
+        }
+
         var context = GetCurrentPaneContext();
         if (context == null)
             return;
+
+        EnsureAgentEventsSubscribed();
 
         var workspaceId = ViewModel.SelectedWorkspace?.Workspace.Id ?? "";
         var thread = App.AgentConversationStore.CreateThread(
@@ -1450,7 +1494,7 @@ public partial class MainWindow : Window
 
     private void AgentThreadsList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
-        if (AgentThreadsList.SelectedItem is not AgentThreadView selected)
+        if (!IsAgentEnabled || AgentThreadsList.SelectedItem is not AgentThreadView selected)
             return;
 
         var switchedThread = !string.Equals(_selectedAgentThreadId, selected.Id, StringComparison.Ordinal);
@@ -1502,12 +1546,20 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(prompt))
             return;
 
+        if (!IsAgentEnabled)
+        {
+            AgentStatusText.Text = "Agent is disabled. Enable it in Settings -> Agent.";
+            return;
+        }
+
         var context = GetCurrentPaneContext();
         if (context == null)
         {
             AgentStatusText.Text = "No active pane selected";
             return;
         }
+
+        EnsureAgentEventsSubscribed();
 
         var workspaceId = ViewModel.SelectedWorkspace?.Workspace.Id ?? "";
         var threadId = _selectedAgentThreadId;

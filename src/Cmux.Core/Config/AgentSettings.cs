@@ -10,7 +10,7 @@ public class AgentSettings
     public string ActiveProvider { get; set; } = "openai";
     public OpenAiCompatibleAgentSettings OpenAi { get; set; } = new();
     public AnthropicAgentSettings Anthropic { get; set; } = new();
-    public bool EnableBashTool { get; set; } = true;
+    public bool EnableBashTool { get; set; } = false;
     public int BashTimeoutSeconds { get; set; } = 120;
     public bool EnableWebSearchTool { get; set; } = false;
     public ExaSearchSettings Exa { get; set; } = new();
@@ -28,7 +28,7 @@ public class AgentSettings
     public string SubmitFallbackOrder { get; set; } = "enter,linefeed";
     public bool EnableTargetSubmitProfiles { get; set; } = false;
     public List<AgentSubmitProfileConfig> SubmitProfiles { get; set; } = [];
-    public bool AutoDiscoverAgentFiles { get; set; } = true;
+    public bool AutoDiscoverAgentFiles { get; set; } = false;
     public string AgentInstructionsPath { get; set; } = "";
     public string SkillsRootPath { get; set; } = "";
     public bool AutoCompactContext { get; set; } = true;

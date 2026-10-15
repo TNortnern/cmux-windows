@@ -1,0 +1,95 @@
+<Window x:Class="Cmux.Views.ToolApprovalWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Approve agent action" Height="500" Width="640"
+        MinHeight="360" MinWidth="460"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None" AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False">
+
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="32" CornerRadius="0" GlassFrameThickness="0"
+                      ResizeBorderThickness="4" />
+    </WindowChrome.WindowChrome>
+
+    <Border Background="{StaticResource BackgroundBrush}"
+            CornerRadius="{StaticResource WindowCornerRadius}"
+            BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="20" ShadowDepth="4" Color="#000000" Opacity="0.4" Direction="270" />
+        </Border.Effect>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="32" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Title bar: closing the window is a denial -->
+            <Border Grid.Row="0" Background="{StaticResource SidebarBackgroundBrush}"
+                    CornerRadius="10,10,0,0"
+                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                <Grid>
+                    <TextBlock Text="Approve agent action" Foreground="{StaticResource ForegroundDimBrush}"
+                               FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0" />
+                    <Button Style="{StaticResource WindowCloseButton}" HorizontalAlignment="Right"
+                            WindowChrome.IsHitTestVisibleInChrome="True"
+                            Click="Deny_Click" Width="38" Height="32">
+                        <TextBlock Text="&#xE8BB;" FontFamily="Segoe MDL2 Assets" FontSize="9" />
+                    </Button>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Row="1" Margin="14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock x:Name="ToolNameText" Grid.Row="0"
+                           Foreground="{StaticResource ForegroundBrush}"
+                           FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+
+                <TextBlock x:Name="TargetText" Grid.Row="1" Margin="0,4,0,0"
+                           Foreground="{StaticResource ForegroundDimBrush}"
+                           FontSize="12" TextWrapping="Wrap" />
+
+                <TextBlock Grid.Row="2" Margin="0,10,0,4"
+                           Foreground="{StaticResource ForegroundDimBrush}"
+                           FontSize="12" TextWrapping="Wrap"
+                           Text="The agent asked to run this. Review the exact input below. Esc or Enter denies." />
+
+                <!-- Read-only: the approved text is exactly what the tool receives -->
+                <TextBox x:Name="DetailsBox" Grid.Row="3"
+                         Style="{StaticResource CmuxTextBox}"
+                         IsReadOnly="True"
+                         FontFamily="Consolas"
+                         FontSize="12"
+                         TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Disabled"
+                         AcceptsReturn="True"
+                         Focusable="True" />
+
+                <TextBlock Grid.Row="4" Margin="0,8,0,0"
+                           Foreground="{StaticResource ForegroundDimBrush}"
+                           FontSize="11" TextWrapping="Wrap"
+                           Text="Always allow applies to this tool for the rest of this app session." />
+
+                <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                    <Button x:Name="RunOnceButton" Content="Run once" Style="{StaticResource CmuxButton}"
+                            Padding="12,6" Margin="0,0,8,0" Click="RunOnce_Click" />
+                    <Button x:Name="AlwaysButton" Content="Always allow" Style="{StaticResource CmuxButton}"
+                            Padding="12,6" Margin="0,0,8,0" MaxWidth="260" Click="AlwaysAllow_Click" />
+                    <!-- Deny is the default button (Enter) and the cancel button (Esc) -->
+                    <Button x:Name="DenyButton" Content="Deny" Style="{StaticResource AccentButton}"
+                            Padding="14,6" IsDefault="True" IsCancel="True" Click="Deny_Click" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
