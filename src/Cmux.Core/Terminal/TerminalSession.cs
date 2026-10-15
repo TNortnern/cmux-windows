@@ -354,9 +354,10 @@ public sealed class TerminalSession : IDisposable
                 stream.Write(data, 0, data.Length);
                 stream.Flush();
             }
-            catch (IOException) when (_disposed)
+            catch (IOException)
             {
-                // Expected during shutdown
+                // Shell exited (broken pipe) or shutdown in progress; the keystroke has nowhere to go.
+                // ProcessExited closes the pane, so dropping it is correct.
             }
             catch (ObjectDisposedException)
             {
