@@ -1,35 +1,146 @@
-# cmux for Windows
+# cmux windows
 
-A dark, keyboard-first terminal multiplexer for Windows, inspired by tmux/cmux workflows but built natively with WPF + ConPTY.
+A dark, keyboard-first terminal multiplexer for Windows. Tabs, split panes, workspaces, and a sidebar that shows git branch, working directory, and agent notifications, built natively with WPF and the Windows ConPTY API.
 
----
-
-## Why / Who / What / How
-
-| Why (problem) | Who (for) | What (feature) | How to use |
-|---|---|---|---|
-| You lose context across projects and shells | Developers juggling many repos/tasks | **Workspaces + surfaces (tabs)** | `Ctrl+N` new workspace, `Ctrl+T` new surface, switch with `Ctrl+1..9` |
-| One terminal is never enough | CLI-heavy users, agent workflows | **Split panes** (right/down) | `Ctrl+D` split right, `Ctrl+Shift+D` split down, `Ctrl+Alt+Arrow` focus pane |
-| You miss important agent outputs | AI-assisted coding users (Claude/Codex/etc.) | **OSC notifications + unread tracking** | `Ctrl+I` open notifications, `Ctrl+Shift+U` jump to latest unread |
-| You need auditability of executed commands | Security-conscious / debugging workflows | **Command logs + history picker** | `Ctrl+Shift+L` logs, `Ctrl+Alt+H` command history, insert/run from UI |
-| You want full session recall after crashes/restarts | Long-running sessions | **Session persistence + transcript capture** | Auto restore on startup + open **Session Vault** (`Ctrl+Shift+V`) |
-| You want searchable output history like Termius vault | Anyone reviewing terminal sessions | **Session Vault browser** | Open vault, filter captures, preview transcript, copy/open file |
-| You need dark theme consistency and personalization | Users who care about UX/readability | **Dark UI + terminal theme customization** | Settings (`Ctrl+,`) for colors/font/cursor + workspace accents |
-| You want quick actions without mouse hunting | Keyboard-first power users | **Command palette + shortcuts** | `Ctrl+Shift+P` command palette, menu mirrors key flows |
-| You need automation from scripts/tools | Integrators/agent hooks | **Named pipe CLI API** (`cmux`) | `cmux notify`, `cmux workspace`, `cmux split`, `cmux status` |
+cmux windows is a Windows port of the cmux workflow. It is a fork of [mkurman/cmux-windows](https://github.com/mkurman/cmux-windows) (MIT).
 
 ---
 
-## Core capabilities
+## Install
 
-- Native **ConPTY terminal emulation** (real Windows terminal backend)
-- Workspace sidebar with metadata (git branch, cwd, notifications)
-- Multi-surface tabs and split-pane layout management
-- Notification ingestion (OSC 9/99/777) for coding agents
-- Command logs/history with filtering and quick replay
-- Terminal transcript capture + Session Vault browsing
-- Persistent sessions (window + workspace/surface/pane state)
-- Dark desktop UI with keyboard-first navigation
+1. Download `cmux-windows-<version>-win-x64.zip` and its `.sha256` file from the [Releases](../../releases) page.
+2. Optional: verify the download with `Get-FileHash -Algorithm SHA256 cmux-windows-<version>-win-x64.zip` and compare it with the `.sha256` file.
+3. Unzip the archive anywhere and run `cmuxw.exe`.
+
+The archive is self-contained and includes the .NET runtime, so you don't need to install .NET.
+
+> **SmartScreen:** the binaries are not code-signed yet. Windows may show "Windows protected your PC" the first time. Click **More info**, then **Run anyway**. Check the SHA256 first if you want to be sure the file is the one published here.
+
+### Requirements
+
+- Windows 10 version 1809 or later, or Windows 11
+- x64 processor
+
+### What's in the archive
+
+| File | Purpose |
+|---|---|
+| `cmuxw.exe` | The desktop app |
+| `cmux.exe` | Command-line client for automation (see [CLI usage](#cli-usage)) |
+| `cmux-daemon.exe` | Optional session daemon (see [Session daemon](#session-daemon-optional)) |
+
+Keep the three files in the same folder. Add that folder to `PATH` if you want `cmux` available everywhere.
+
+---
+
+## Features
+
+- **Workspaces** with a sidebar showing the git branch, current directory, and unread notifications.
+- **Tabs (surfaces)** inside each workspace.
+- **Split panes**, right or down, with keyboard focus movement and zoom.
+- **New tabs and splits open in the current directory.** This works through shell integration:
+  - PowerShell and `cmd.exe`: cmux installs a prompt hook that reports the directory (OSC 9;9).
+  - bash and WSL: directory changes are reported with OSC 7.
+  - Other shells still work; new tabs just start in the configured directory.
+- **Notifications** from coding agents (OSC 9, 99, 777) with unread tracking and Windows toast alerts.
+- **Command palette**, search, snippets, and command history.
+- **Themes and fonts** for the terminal, with custom colors.
+- **Session restore**: window layout, workspaces, tabs, and working directories come back on startup.
+
+---
+
+## Keyboard shortcuts
+
+<!-- KEYMAP -->
+
+---
+
+## Session daemon (optional)
+
+By default each terminal pane runs in the cmux process. When the window closes, its shells close with it.
+
+Turn on **Settings > Behavior > Session Daemon** to run shells in `cmux-daemon.exe` instead. Shells then keep running after cmux closes. The trade-off is memory: each pane uses more RAM in daemon mode. The setting takes effect the next time cmux starts.
+
+The daemon is off by default and never starts unless you enable it.
+
+---
+
+## AI agent (optional, off by default, approval required)
+
+cmux can host an AI assistant that runs commands in your shell. This is **off by default**. Enable it in **Settings > Agent**, then configure a provider and API key. Nothing is sent to a model until you do.
+
+When the agent is enabled:
+
+- It can only run commands after you approve each one.
+- API keys are stored with Windows DPAPI (per-user encryption) in `%LOCALAPPDATA%\cmux\secrets.json`, never in plain text.
+- Conversation history is kept only if you turn on conversation memory.
+
+---
+
+## Privacy
+
+- **Terminal transcripts are off by default.** Turn on "Capture On Close" or "Capture On Clear" in Settings > Behavior if you want them saved. Transcripts are scrubbed for common secrets (tokens, passwords, `Authorization` headers, and similar) before they are written.
+- **Command logs** record commands you run in cmux so you can search history. Secrets are redacted before they are stored. Logs older than the retention period are deleted automatically (90 days by default; set it to 0 to keep them).
+- **Logs and data live in `%LOCALAPPDATA%\cmux`.** The diagnostic log is `%LOCALAPPDATA%\cmux\logs\cmux.log` (rotated at 1 MB). It never contains terminal output or command lines.
+- **No telemetry.** cmux makes no network calls except the ones you configure (the AI agent and its tools).
+
+To delete everything cmux has stored, close the app and remove `%LOCALAPPDATA%\cmux`.
+
+---
+
+## Build from source
+
+Requirements:
+
+- Windows 10 1809 or later, or Windows 11
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+
+```powershell
+git clone https://github.com/<your-fork>/cmux-windows.git
+cd cmux-windows
+
+dotnet build Cmux.sln -c Debug     # warnings are errors
+dotnet test tests/Cmux.Tests        # unit tests
+dotnet run --project src/Cmux/Cmux.csproj -c Debug
+```
+
+### Release build
+
+Build the app, the session daemon, and the CLI into one folder:
+
+```powershell
+dotnet publish src/Cmux/Cmux.csproj -c Release -r win-x64 --self-contained -o publish/app
+dotnet publish src/Cmux.Daemon/Cmux.Daemon.csproj -c Release -r win-x64 --self-contained -o publish/app
+dotnet publish src/Cmux.Cli/Cmux.Cli.csproj -c Release -r win-x64 --self-contained -o publish/app
+```
+
+The result is `publish/app/cmuxw.exe`, `publish/app/cmux-daemon.exe`, and `publish/app/cmux.exe`.
+
+NuGet packages are pinned by lock files (`packages.lock.json`). CI restores with `dotnet restore Cmux.sln --locked-mode`, so a dependency change must update the lock files in the same commit.
+
+---
+
+## CLI usage
+
+`cmux.exe` talks to the running app over the named pipe `\\.\pipe\cmux`.
+
+```powershell
+# Send a notification (for example, from an agent hook)
+cmux notify --title "Claude Code" --body "Waiting for input"
+
+# Workspaces
+cmux workspace list
+cmux workspace create --name "My Project"
+cmux workspace select --index 0
+
+# Tabs and panes
+cmux surface create
+cmux split right
+cmux split down
+
+# Status
+cmux status
+```
 
 ---
 
@@ -50,166 +161,20 @@ A dark, keyboard-first terminal multiplexer for Windows, inspired by tmux/cmux w
 
 ---
 
-## Build and run (Windows)
-
-### Requirements
-
-- Windows 10/11
-- [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- Optional: Visual Studio 2022 / Build Tools
-
-### Clone
-
-```powershell
-git clone <repo-url> cmux-windows
-cd cmux-windows
-```
-
-### Dev run
-
-```powershell
-dotnet build Cmux.sln -c Debug
-dotnet run --project src/Cmux/Cmux.csproj -c Debug
-```
-
----
-
-## Build `.exe` on Windows
-
-### 1) Framework-dependent `.exe` (smallest output)
-
-```powershell
-dotnet publish src/Cmux/Cmux.csproj -c Release -r win-x64 --self-contained false -o publish/cmux-win-x64
-```
-
-Output:
-- `publish/cmux-win-x64/cmuxw.exe`
-
-Use this when target machines already have .NET runtime installed.
-
-### 2) Self-contained `.exe` (no runtime install needed)
-
-```powershell
-dotnet publish src/Cmux/Cmux.csproj -c Release -r win-x64 --self-contained true -o publish/cmux-win-x64-sc
-```
-
-Output:
-- `publish/cmux-win-x64-sc/cmuxw.exe`
-
-### 3) Single-file self-contained `.exe` (portable artifact)
-
-```powershell
-dotnet publish src/Cmux/Cmux.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:PublishTrimmed=false -o publish/cmux-win-x64-single
-```
-
-Output:
-- `publish/cmux-win-x64-single/cmuxw.exe`
-
-> Note: WebView2-backed features may require WebView2 Runtime depending on target system state.
-
-### Build CLI executable
-
-```powershell
-dotnet publish src/Cmux.Cli/Cmux.Cli.csproj -c Release -r win-x64 --self-contained true -o publish/cmux-cli
-```
-
-Add `publish/cmux-cli` to `PATH` to use `cmux` globally.
-
----
-
-## First 5 minutes (how to use)
-
-1. Launch `cmuxw.exe`
-2. `Ctrl+N` to create a workspace for your repo
-3. `Ctrl+T` to create additional surfaces (tabs)
-4. Split panes with `Ctrl+D` / `Ctrl+Shift+D`
-5. Open command palette with `Ctrl+Shift+P` for quick actions
-6. Open logs with `Ctrl+Shift+L`
-7. Open Session Vault with `Ctrl+Shift+V`
-8. Open settings with `Ctrl+,` and tune terminal theme/font/cursor
-
----
-
-## Keyboard shortcuts
-
-### Workspaces
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl+N` | New workspace |
-| `Ctrl+1..8` | Jump to workspace 1..8 |
-| `Ctrl+9` | Jump to last workspace |
-| `Ctrl+Shift+W` | Close workspace |
-| `Ctrl+Shift+R` | Rename workspace |
-| `Ctrl+B` | Toggle sidebar |
-
-### Surfaces (tabs)
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl+T` | New surface |
-| `Ctrl+W` | Close surface |
-| `Ctrl+Shift+]` | Next surface |
-| `Ctrl+Shift+[` | Previous surface |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle surfaces |
-
-### Panes
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl+D` | Split right |
-| `Ctrl+Shift+D` | Split down |
-| `Ctrl+Alt+Arrow` | Focus adjacent pane |
-| `Ctrl+Shift+Z` | Zoom/unzoom pane |
-
-### Productivity
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl+Shift+P` | Command palette |
-| `Ctrl+Shift+F` | Search overlay |
-| `Ctrl+Shift+L` | Command logs |
-| `Ctrl+Shift+V` | Session vault |
-| `Ctrl+Alt+H` | Command history picker |
-| `Ctrl+,` | Settings |
-
----
-
-## CLI usage
-
-```powershell
-# Send a notification (e.g., from agent hooks)
-cmux notify --title "Claude Code" --body "Waiting for input"
-
-# Workspace management
-cmux workspace list
-cmux workspace create --name "My Project"
-cmux workspace select --index 0
-
-# Surface/pane actions
-cmux surface create
-cmux split right
-cmux split down
-
-# Inspect status
-cmux status
-```
-
----
-
-## Architecture (high level)
+## Project layout
 
 ```text
 src/
-  Cmux/         WPF desktop app (views, controls, themes)
+  Cmux/         WPF desktop app (views, controls, themes)            -> cmuxw.exe
   Cmux.Core/    terminal engine, models, services, persistence, IPC
-  Cmux.Cli/     command-line client for automation
+  Cmux.Daemon/  optional session daemon                              -> cmux-daemon.exe
+  Cmux.Cli/     command-line client                                  -> cmux.exe
 tests/
   Cmux.Tests/   unit tests
 ```
 
 ---
 
-## License
+## Credits
 
-MIT
+cmux windows is based on [mkurman/cmux-windows](https://github.com/mkurman/cmux-windows) by Mariusz Kurman, released under the MIT License. See [LICENSE](LICENSE).

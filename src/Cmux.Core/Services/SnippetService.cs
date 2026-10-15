@@ -9,10 +9,7 @@ namespace Cmux.Core.Services;
 /// </summary>
 public class SnippetService
 {
-    private static readonly string DataDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux");
-
-    private static readonly string FilePath = Path.Combine(DataDir, "snippets.json");
+    private static string FilePath => Path.Combine(CmuxPaths.DataDirectory, "snippets.json");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -151,8 +148,11 @@ public class SnippetService
                 Save();
             }
         }
-        catch
+        catch (Exception ex)
         {
+            // Keep the unreadable file for recovery rather than overwriting it with defaults.
+            Log.Error("snippets.json is unreadable; keeping a copy and seeding defaults", ex);
+            try { File.Copy(FilePath, FilePath + ".corrupt", overwrite: true); } catch { }
             _snippets.Clear();
             SeedDefaults();
             Save();
@@ -163,7 +163,7 @@ public class SnippetService
     {
         try
         {
-            Directory.CreateDirectory(DataDir);
+            Directory.CreateDirectory(CmuxPaths.DataDirectory);
             var json = JsonSerializer.Serialize(_snippets, JsonOptions);
             var tempPath = FilePath + ".tmp";
             File.WriteAllText(tempPath, json);

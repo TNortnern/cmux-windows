@@ -576,7 +576,8 @@
                             <TextBlock Text="Scrollback Lines" Style="{StaticResource SectionLabel}" />
                             <TextBox x:Name="ScrollbackBox" Grid.Column="1"
                                      Style="{StaticResource SettingsTextBox}" Width="100"
-                                     HorizontalAlignment="Left" />
+                                     HorizontalAlignment="Left"
+                                     ToolTip="Lines kept per pane (100 to 100000). Applies to panes opened after saving." />
                         </Grid>
 
                         <!-- Visual Bell -->
@@ -617,6 +618,18 @@
                             <CheckBox x:Name="RestoreSessionCheck" Grid.Column="1"
                                       Style="{StaticResource SettingsCheck}"
                                       Content="Restore previous session on startup" />
+                        </Grid>
+
+                        <!-- Session daemon (opt-in) -->
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Session Daemon" Style="{StaticResource SectionLabel}" />
+                            <CheckBox x:Name="SessionDaemonCheck" Grid.Column="1"
+                                      Style="{StaticResource SettingsCheck}"
+                                      Content="Keep shells running after cmux closes (session daemon — uses more memory, restart required)" />
                         </Grid>
 
                         <!-- Confirm on Close -->
@@ -877,6 +890,16 @@
                             <TextBlock Text="Enable Agent" Style="{StaticResource SectionLabel}" />
                             <CheckBox x:Name="AgentEnabledCheck" Grid.Column="1" Style="{StaticResource SettingsCheck}"
                                       Content="Enable pane handler commands" />
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="1" TextWrapping="Wrap"
+                                       Foreground="{StaticResource ForegroundDimBrush}"
+                                       Text="Off by default. When enabled, an AI agent can run commands in your shell, but only after you approve each one. Nothing is sent to a model unless you enable this and configure a provider." />
                         </Grid>
 
                         <Grid Margin="0,0,0,10">

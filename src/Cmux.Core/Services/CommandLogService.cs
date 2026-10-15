@@ -1,6 +1,8 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Cmux.Core.Config;
+using AppLog = Cmux.Core.Services.Log;
 using Cmux.Core.Models;
 
 namespace Cmux.Core.Services;
@@ -8,13 +10,19 @@ namespace Cmux.Core.Services;
 /// <summary>
 /// Tracks shell commands via OSC 133 prompt markers and maintains a searchable log.
 /// Completed commands are persisted to daily JSONL files under %LOCALAPPDATA%/cmux/logs.
+/// Terminal transcripts are written only when the CaptureTranscriptsOn* settings are enabled.
 /// </summary>
 public class CommandLogService
 {
     private const int MaxEntries = 5000;
+    private const int MaxCommandLength = 4096;
 
-    private static readonly string LogsDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "cmux", "logs");
+    // Bump when the redaction rules change so existing logs are re-scrubbed on the next start.
+    private const int RedactionVersion = 2;
+    private const string ScrubStateFileName = ".scrub-state";
+
+    // Serializes file appends, rewrites and deletes between the UI thread and the background scrub.
+    private static readonly object FileGate = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -45,6 +53,24 @@ public class CommandLogService
         @"([a-z][a-z0-9+\-.]*://[^\s/@:]+:)([^@\s]+)(@)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    /// <summary>
+    /// Redaction rules applied to commands and transcripts, in order.
+    /// Each replacement keeps the label and drops only the secret value.
+    /// </summary>
+    private static readonly (Regex Pattern, string Replacement)[] RedactionRules =
+    [
+        (SecretEnvAssignmentRegex, "$1[REDACTED]"),
+        (SecretFlagRegex, "$1[REDACTED]"),
+        (UriCredentialsRegex, "$1[REDACTED]$3"),
+        (new Regex(@"(\bauthorization:\s*(?:bearer|basic)\s+)\S+", RegexOptions.IgnoreCase | RegexOptions.Compiled), "$1[REDACTED]"),
+        (new Regex(@"(\bx-api-key:\s*)\S+", RegexOptions.IgnoreCase | RegexOptions.Compiled), "$1[REDACTED]"),
+        (new Regex(@"\bgh[pousr]_[A-Za-z0-9]{20,}", RegexOptions.Compiled), "[REDACTED]"),
+        (new Regex(@"\bsk-[A-Za-z0-9_-]{20,}", RegexOptions.Compiled), "[REDACTED]"),
+        (new Regex(@"\bAKIA[0-9A-Z]{16}\b", RegexOptions.Compiled), "[REDACTED]"),
+        (new Regex(@"(\b[A-Za-z0-9_]*(?:PRIVATE_KEY|PASSPHRASE|PASS|CREDENTIALS?|AUTH|COOKIE)\s*=\s*)(\""[^\""\r\n]*\""|'[^'\r\n]*'|[^\s\r\n]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled), "$1[REDACTED]"),
+        (new Regex(@"(\bcurl\b[^\r\n|;&]*?\s(?:-u|--user)(?:\s+|=))(\""[^\""\r\n]*\""|'[^'\r\n]*'|[^\s\r\n]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled), "$1[REDACTED]"),
+    ];
+
     public IReadOnlyList<CommandLogEntry> Log
     {
         get
@@ -58,11 +84,11 @@ public class CommandLogService
 
     public CommandLogService()
     {
+        // Retention is cheap and must always run; the content scrub runs in the background.
         ApplyRetentionPolicy();
         ApplyTranscriptRetentionPolicy();
-        ScrubSensitiveDataInLogFiles();
-        ScrubSensitiveDataInTranscriptFiles();
         LoadRecentFromDisk(days: GetLoadWindowDays());
+        _ = Task.Run(ScrubStoredDataSafe);
 
         SettingsService.SettingsChanged += () =>
         {
@@ -71,11 +97,7 @@ public class CommandLogService
         };
     }
 
-    public string GetLogsDirectoryPath()
-    {
-        Directory.CreateDirectory(LogsDir);
-        return LogsDir;
-    }
+    public string GetLogsDirectoryPath() => CmuxPaths.LogsDirectory;
 
     public string GetTerminalTranscriptsDirectoryPath()
     {
@@ -86,41 +108,43 @@ public class CommandLogService
 
     public string? SaveTerminalTranscript(string workspaceId, string surfaceId, string paneId, string? workingDirectory, string? text, string reason)
     {
-        if (string.IsNullOrWhiteSpace(text))
+        if (string.IsNullOrWhiteSpace(text) || !IsTranscriptCaptureEnabled(reason))
             return null;
 
         try
         {
             MaybeApplyTranscriptRetentionPolicy();
 
-            var sanitizedText = SanitizeTranscriptText(text);
-            if (string.IsNullOrWhiteSpace(sanitizedText))
+            var body = Redact(text);
+            if (string.IsNullOrWhiteSpace(body))
                 return null;
 
-            var root = GetTerminalTranscriptsDirectoryPath();
-            var dayDir = Path.Combine(root, DateTime.Now.ToString("yyyy-MM-dd"));
+            var dayDir = Path.Combine(GetTerminalTranscriptsDirectoryPath(), DateTime.Now.ToString("yyyy-MM-dd"));
             Directory.CreateDirectory(dayDir);
 
             var ts = DateTime.Now;
-            var safeReason = SanitizeFileNameSegment(reason);
-            var fileName = $"{ts:HHmmss}_{safeReason}_{ShortId(workspaceId)}_{ShortId(surfaceId)}_{ShortId(paneId)}.log";
+            var fileName = $"{ts:HHmmss}_{SanitizeFileNameSegment(reason)}_{ShortId(workspaceId)}_{ShortId(surfaceId)}_{ShortId(paneId)}.log";
             var filePath = Path.Combine(dayDir, fileName);
 
-            var header = string.Join(Environment.NewLine,
-                "# cmux terminal transcript",
-                $"# captured-at: {ts:O}",
-                $"# workspace-id: {workspaceId}",
-                $"# surface-id: {surfaceId}",
-                $"# pane-id: {paneId}",
-                $"# reason: {reason}",
-                $"# working-directory: {(string.IsNullOrWhiteSpace(workingDirectory) ? "-" : workingDirectory)}",
-                "");
-
-            File.WriteAllText(filePath, header + Environment.NewLine + sanitizedText);
+            // Header and body are streamed straight to the file: no intermediate concatenated copies.
+            lock (FileGate)
+            {
+                using var writer = new StreamWriter(filePath, append: false, Encoding.UTF8);
+                writer.WriteLine("# cmux terminal transcript");
+                writer.WriteLine($"# captured-at: {ts:O}");
+                writer.WriteLine($"# workspace-id: {workspaceId}");
+                writer.WriteLine($"# surface-id: {surfaceId}");
+                writer.WriteLine($"# pane-id: {paneId}");
+                writer.WriteLine($"# reason: {reason}");
+                writer.WriteLine($"# working-directory: {(string.IsNullOrWhiteSpace(workingDirectory) ? "-" : workingDirectory)}");
+                writer.WriteLine();
+                writer.Write(body);
+            }
             return filePath;
         }
-        catch
+        catch (Exception ex)
         {
+            AppLog.Error("Failed to save terminal transcript", ex);
             return null;
         }
     }
@@ -164,87 +188,11 @@ public class CommandLogService
                 startIndex++;
 
             var content = string.Join(Environment.NewLine, lines.Skip(startIndex));
-            return SanitizeTranscriptText(content);
+            return Redact(content);
         }
         catch
         {
             return string.Empty;
-        }
-    }
-
-    public void ScrubSensitiveDataInTranscriptFiles()
-    {
-        try
-        {
-            var root = GetTerminalTranscriptsDirectoryPath();
-            foreach (var filePath in Directory.EnumerateFiles(root, "*.log", SearchOption.AllDirectories))
-            {
-                var original = File.ReadAllText(filePath);
-                var sanitized = SanitizeTranscriptText(original);
-
-                if (!string.Equals(original, sanitized, StringComparison.Ordinal))
-                    File.WriteAllText(filePath, sanitized);
-            }
-        }
-        catch
-        {
-            // Best effort scrub.
-        }
-    }
-
-    public void ScrubSensitiveDataInLogFiles()
-    {
-        try
-        {
-            Directory.CreateDirectory(LogsDir);
-
-            foreach (var filePath in Directory.EnumerateFiles(LogsDir, "*.jsonl"))
-            {
-                bool changed = false;
-                var cleaned = new List<string>();
-
-                foreach (var line in File.ReadLines(filePath))
-                {
-                    if (string.IsNullOrWhiteSpace(line))
-                        continue;
-
-                    try
-                    {
-                        var entry = JsonSerializer.Deserialize<CommandLogEntry>(line, JsonOptions);
-                        if (entry == null)
-                            continue;
-
-                        var original = entry.Command;
-                        entry.Command = SanitizeCommandForStorage(entry.Command);
-
-                        if (string.IsNullOrWhiteSpace(entry.Command))
-                        {
-                            changed = true;
-                            continue;
-                        }
-
-                        if (!string.Equals(original, entry.Command, StringComparison.Ordinal))
-                            changed = true;
-
-                        cleaned.Add(JsonSerializer.Serialize(entry, JsonOptions));
-                    }
-                    catch
-                    {
-                        changed = true;
-                    }
-                }
-
-                if (changed)
-                {
-                    var tempPath = filePath + ".tmp";
-                    File.WriteAllLines(tempPath, cleaned);
-                    File.Move(tempPath, filePath, overwrite: true);
-                }
-            }
-        }
-        catch
-        {
-            // Best effort scrub.
         }
     }
 
@@ -254,8 +202,6 @@ public class CommandLogService
         {
             lock (_lock)
             {
-                Directory.CreateDirectory(LogsDir);
-
                 var days = GetRetentionDaysOrNull();
                 if (days is null)
                 {
@@ -265,23 +211,26 @@ public class CommandLogService
 
                 var cutoff = DateOnly.FromDateTime(DateTime.Today.AddDays(-(days.Value - 1)));
 
-                foreach (var filePath in Directory.EnumerateFiles(LogsDir, "*.jsonl"))
+                foreach (var filePath in Directory.EnumerateFiles(CmuxPaths.LogsDirectory, "*.jsonl"))
                 {
                     var fileName = Path.GetFileNameWithoutExtension(filePath);
                     if (!DateOnly.TryParse(fileName, out var date))
                         continue;
 
                     if (date < cutoff)
-                        File.Delete(filePath);
+                    {
+                        lock (FileGate)
+                            File.Delete(filePath);
+                    }
                 }
 
                 _log.RemoveAll(e => DateOnly.FromDateTime(e.StartedAt.ToLocalTime()) < cutoff);
                 _lastRetentionSweepDate = DateOnly.FromDateTime(DateTime.Today);
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort cleanup.
+            AppLog.Error("Command log retention sweep failed", ex);
         }
     }
 
@@ -299,11 +248,14 @@ public class CommandLogService
             var root = GetTerminalTranscriptsDirectoryPath();
             var cutoffDate = DateOnly.FromDateTime(DateTime.Today.AddDays(-(days.Value - 1)));
 
-            foreach (var filePath in Directory.EnumerateFiles(root, "*.log", SearchOption.AllDirectories))
+            lock (FileGate)
             {
-                var fileDate = DateOnly.FromDateTime(File.GetLastWriteTime(filePath));
-                if (fileDate < cutoffDate)
-                    File.Delete(filePath);
+                foreach (var filePath in Directory.EnumerateFiles(root, "*.log", SearchOption.AllDirectories))
+                {
+                    var fileDate = DateOnly.FromDateTime(File.GetLastWriteTime(filePath));
+                    if (fileDate < cutoffDate)
+                        File.Delete(filePath);
+                }
             }
 
             foreach (var dir in Directory.EnumerateDirectories(root))
@@ -314,18 +266,17 @@ public class CommandLogService
 
             _lastTranscriptRetentionSweepDate = DateOnly.FromDateTime(DateTime.Today);
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort cleanup.
+            AppLog.Error("Transcript retention sweep failed", ex);
         }
     }
 
     public IReadOnlyList<DateOnly> GetAvailableDates()
     {
         MaybeApplyRetentionPolicy();
-        Directory.CreateDirectory(LogsDir);
 
-        var dates = Directory.EnumerateFiles(LogsDir, "*.jsonl")
+        var dates = Directory.EnumerateFiles(CmuxPaths.LogsDirectory, "*.jsonl")
             .Select(Path.GetFileNameWithoutExtension)
             .Where(name => !string.IsNullOrWhiteSpace(name) && DateOnly.TryParse(name, out _))
             .Select(name => DateOnly.Parse(name!))
@@ -389,14 +340,27 @@ public class CommandLogService
         if (LooksLikeSecretInput(sanitized))
             return null;
 
-        sanitized = SecretEnvAssignmentRegex.Replace(sanitized, "$1[REDACTED]");
-        sanitized = SecretFlagRegex.Replace(sanitized, "$1[REDACTED]");
-        sanitized = UriCredentialsRegex.Replace(sanitized, "$1[REDACTED]$3");
+        sanitized = Redact(sanitized);
 
-        if (sanitized.Length > 4096)
-            sanitized = sanitized[..4096];
+        if (sanitized.Length > MaxCommandLength)
+            sanitized = sanitized[..MaxCommandLength];
 
         return sanitized;
+    }
+
+    /// <summary>
+    /// Replaces secret values in free text (commands and transcripts) with [REDACTED].
+    /// Returns the input instance unchanged when nothing matches.
+    /// </summary>
+    internal static string Redact(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return string.Empty;
+
+        var result = text;
+        foreach (var (pattern, replacement) in RedactionRules)
+            result = pattern.Replace(result, replacement);
+        return result;
     }
 
     public void RecordManualCommandSubmission(string paneId, string workspaceId, string surfaceId, string command, string? workingDirectory)
@@ -532,6 +496,15 @@ public class CommandLogService
         LogChanged?.Invoke();
     }
 
+
+    private static bool IsTranscriptCaptureEnabled(string reason)
+    {
+        var settings = SettingsService.Current;
+        return string.Equals(reason, "clear-terminal", StringComparison.OrdinalIgnoreCase)
+            ? settings.CaptureTranscriptsOnClear
+            : settings.CaptureTranscriptsOnClose;
+    }
+
     private void CompleteActiveCommand(string paneId, int? exitCode)
     {
         if (_activeCommands.TryGetValue(paneId, out var active))
@@ -551,15 +524,15 @@ public class CommandLogService
         {
             MaybeApplyRetentionPolicy();
 
-            Directory.CreateDirectory(LogsDir);
             var date = DateOnly.FromDateTime(entry.StartedAt.ToLocalTime());
-            var filePath = Path.Combine(LogsDir, $"{date:yyyy-MM-dd}.jsonl");
+            var filePath = Path.Combine(CmuxPaths.LogsDirectory, $"{date:yyyy-MM-dd}.jsonl");
             var line = JsonSerializer.Serialize(entry, JsonOptions);
-            File.AppendAllText(filePath, line + Environment.NewLine);
+            lock (FileGate)
+                File.AppendAllText(filePath, line + Environment.NewLine);
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort persistence
+            AppLog.Error("Failed to persist command log entry", ex);
         }
     }
 
@@ -567,10 +540,9 @@ public class CommandLogService
     {
         try
         {
-            Directory.CreateDirectory(LogsDir);
             var minDate = DateOnly.FromDateTime(DateTime.Now.AddDays(-Math.Abs(days)));
 
-            var files = Directory.EnumerateFiles(LogsDir, "*.jsonl")
+            var files = Directory.EnumerateFiles(CmuxPaths.LogsDirectory, "*.jsonl")
                 .Select(path => new { Path = path, Name = Path.GetFileNameWithoutExtension(path) })
                 .Select(x => new { x.Path, Date = DateOnly.TryParse(x.Name, out var d) ? d : (DateOnly?)null })
                 .Where(x => x.Date.HasValue && x.Date.Value >= minDate)
@@ -605,9 +577,153 @@ public class CommandLogService
             _log.Sort((a, b) => b.StartedAt.CompareTo(a.StartedAt));
             TrimLog();
         }
+        catch (Exception ex)
+        {
+            AppLog.Error("Failed to load command log from disk", ex);
+        }
+    }
+
+    /// <summary>
+    /// Scrubs existing logs and transcripts for secrets. Incremental: only files modified since the
+    /// last completed scrub are visited, unless the redaction rules changed (RedactionVersion).
+    /// </summary>
+    private void ScrubStoredDataSafe()
+    {
+        try
+        {
+            ScrubStoredData();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Background log scrub failed", ex);
+        }
+    }
+
+    private void ScrubStoredData()
+    {
+        var logsDir = CmuxPaths.LogsDirectory;
+        var statePath = Path.Combine(logsDir, ScrubStateFileName);
+        var startedUtc = DateTime.UtcNow;
+        var since = ReadScrubState(statePath);
+
+        ScrubLogFiles(logsDir, since);
+        ScrubTranscriptFiles(since);
+
+        try
+        {
+            File.WriteAllText(statePath, $"{RedactionVersion}:{startedUtc.Ticks}");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Failed to record scrub state", ex);
+        }
+    }
+
+    private static DateTime ReadScrubState(string statePath)
+    {
+        try
+        {
+            var parts = File.ReadAllText(statePath).Trim().Split(':');
+            if (parts.Length == 2 &&
+                int.TryParse(parts[0], out var version) && version == RedactionVersion &&
+                long.TryParse(parts[1], out var ticks))
+            {
+                return new DateTime(ticks, DateTimeKind.Utc);
+            }
+        }
         catch
         {
-            // Best effort load
+            // No state yet (first run) or unreadable: scrub everything.
+        }
+        return DateTime.MinValue;
+    }
+
+    private void ScrubLogFiles(string logsDir, DateTime since)
+    {
+        foreach (var filePath in Directory.EnumerateFiles(logsDir, "*.jsonl"))
+        {
+            if (File.GetLastWriteTimeUtc(filePath) <= since)
+                continue;
+
+            try
+            {
+                lock (FileGate)
+                    ScrubLogFile(filePath);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Failed to scrub a command log file", ex);
+            }
+        }
+    }
+
+    private void ScrubLogFile(string filePath)
+    {
+        bool changed = false;
+        var cleaned = new List<string>();
+
+        foreach (var line in File.ReadLines(filePath))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+
+            try
+            {
+                var entry = JsonSerializer.Deserialize<CommandLogEntry>(line, JsonOptions);
+                if (entry == null)
+                    continue;
+
+                var original = entry.Command;
+                entry.Command = SanitizeCommandForStorage(entry.Command);
+
+                if (string.IsNullOrWhiteSpace(entry.Command))
+                {
+                    changed = true;
+                    continue;
+                }
+
+                if (!string.Equals(original, entry.Command, StringComparison.Ordinal))
+                    changed = true;
+
+                cleaned.Add(JsonSerializer.Serialize(entry, JsonOptions));
+            }
+            catch
+            {
+                changed = true;
+            }
+        }
+
+        if (!changed)
+            return;
+
+        var tempPath = filePath + ".tmp";
+        File.WriteAllLines(tempPath, cleaned);
+        File.Move(tempPath, filePath, overwrite: true);
+    }
+
+    private void ScrubTranscriptFiles(DateTime since)
+    {
+        var root = GetTerminalTranscriptsDirectoryPath();
+        foreach (var filePath in Directory.EnumerateFiles(root, "*.log", SearchOption.AllDirectories))
+        {
+            if (File.GetLastWriteTimeUtc(filePath) <= since)
+                continue;
+
+            try
+            {
+                lock (FileGate)
+                {
+                    var original = File.ReadAllText(filePath);
+                    var sanitized = Redact(original);
+
+                    if (!string.Equals(original, sanitized, StringComparison.Ordinal))
+                        File.WriteAllText(filePath, sanitized);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Failed to scrub a transcript file", ex);
+            }
         }
     }
 
@@ -732,18 +848,6 @@ public class CommandLogService
         {
             return null;
         }
-    }
-
-    private string SanitizeTranscriptText(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return string.Empty;
-
-        var sanitized = SecretEnvAssignmentRegex.Replace(text, "$1[REDACTED]");
-        sanitized = SecretFlagRegex.Replace(sanitized, "$1[REDACTED]");
-        sanitized = UriCredentialsRegex.Replace(sanitized, "$1[REDACTED]$3");
-
-        return sanitized;
     }
 
     private static string ShortId(string? value)
