@@ -91,7 +91,6 @@ public partial class SettingsWindow : Window
 
         RestoreSessionCheck.IsChecked = s.RestoreSessionOnStartup;
         SessionDaemonCheck.IsChecked = s.UseSessionDaemon;
-        SoftwareRenderingCheck.IsChecked = s.SoftwareRendering;
         ConfirmCloseCheck.IsChecked = s.ConfirmOnClose;
         AutoCopyCheck.IsChecked = s.AutoCopyOnSelect;
         CtrlClickUrlCheck.IsChecked = s.CtrlClickOpensUrls;
@@ -208,9 +207,7 @@ public partial class SettingsWindow : Window
         s.BracketedPaste = BracketedPasteCheck.IsChecked == true;
 
         s.RestoreSessionOnStartup = RestoreSessionCheck.IsChecked == true;
-        var restartNeeded = s.UseSessionDaemon != (SessionDaemonCheck.IsChecked == true)
-            || s.SoftwareRendering != (SoftwareRenderingCheck.IsChecked == true);
-        s.SoftwareRendering = SoftwareRenderingCheck.IsChecked == true;
+        var daemonChanged = s.UseSessionDaemon != (SessionDaemonCheck.IsChecked == true);
         s.UseSessionDaemon = SessionDaemonCheck.IsChecked == true;
         s.ConfirmOnClose = ConfirmCloseCheck.IsChecked == true;
         s.AutoCopyOnSelect = AutoCopyCheck.IsChecked == true;
@@ -385,9 +382,9 @@ public partial class SettingsWindow : Window
         SettingsService.Save();
         SettingsService.NotifyChanged();
 
-        if (restartNeeded)
+        if (daemonChanged)
         {
-            MessageBox.Show("Daemon and rendering changes take effect the next time cmux starts.",
+            MessageBox.Show("The session daemon setting takes effect the next time cmux starts.",
                 "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         return true;

@@ -33,10 +33,6 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
-        // Must be set before the first window is created.
-        if (SettingsService.Current.SoftwareRendering)
-            System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
-
         // Global exception handlers: log the exception, then show it
         DispatcherUnhandledException += (s, args) =>
         {
