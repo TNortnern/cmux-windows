@@ -35,6 +35,7 @@ Keep the three files in the same folder. Add that folder to `PATH` if you want `
 
 ## Features
 
+- **Lightweight:** about 75 MB idle and about 120 MB with a dozen busy panes ([measurements](docs/PERFORMANCE.md)).
 - **Workspaces** with a sidebar showing the git branch, current directory, and unread notifications.
 - **Tabs (surfaces)** inside each workspace.
 - **Split panes**, right or down, with keyboard focus movement and zoom.

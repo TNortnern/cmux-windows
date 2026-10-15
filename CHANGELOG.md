@@ -6,7 +6,8 @@
 - **New tabs and splits open in the focused pane's current directory**, including PowerShell
   (prompt hook, OSC 9;9), cmd.exe, and paths with spaces. This is verified end to end, with and
   without the session daemon.
-- **Much lower memory:** −18% idle, −35% with busy panes, and the tab-switch leak is fixed. See
+- **About 75% less memory:** 320 → 74 MB idle and 505 → 122 MB with 12 busy panes. The tab-switch
+  leak is fixed, and rendering uses software by default (the GPU stays available in Settings). See
   [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 - **Keyboard shortcuts now work while a terminal has focus.** They follow Windows Terminal
   conventions (see the README). Ctrl+letter chords go to your shell again (Ctrl+W, Ctrl+D, …).
@@ -29,6 +30,10 @@
 - Crash races between the PTY read thread and WPF. Notifications and the sidebar are now updated on
   the UI thread.
 - Daemon responses could be matched to the wrong request.
+- With the session daemon on, the first pane after a cold start was never persisted. Terminal
+  queries (cursor position, device attributes) were answered twice.
+- `settings.json` keys are matched case-insensitively, so hand-edited PascalCase keys no longer
+  get silently ignored.
 
 ### Security
 See [SECURITY.md](SECURITY.md). Summary:
@@ -41,6 +46,7 @@ See [SECURITY.md](SECURITY.md). Summary:
 
 ### Changes in behaviour
 - The session daemon is now **opt-in** (Settings → Behavior). It roughly doubles per-pane memory.
+- Software rendering is the default (Settings → Behavior → *Software rendering*, restart required).
 - AI agent bash tool and AGENTS.md auto-discovery are off by default.
 - Default scrollback is 5,000 lines (configurable; the setting now takes effect).
 
@@ -51,4 +57,4 @@ See [SECURITY.md](SECURITY.md). Summary:
 - CI publishes app + daemon + CLI in one zip with a SHA-256, and creates a GitHub Release on `v*` tags.
 - New app manifest (Per-Monitor V2 DPI, long paths). Version is set once in `Directory.Build.props`.
 - `cmux rpc <COMMAND> key=value…` gives raw access to the control pipe for scripting.
-- Tests went from 53 to 250.
+- Tests went from 53 to 252, plus end-to-end scripts in `tools/bench/` covering keys, cwd, daemon, leaks and RAM.

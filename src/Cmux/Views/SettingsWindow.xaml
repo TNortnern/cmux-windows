@@ -629,7 +629,7 @@
                             <TextBlock Text="Rendering" Style="{StaticResource SectionLabel}" />
                             <CheckBox x:Name="SoftwareRenderingCheck" Grid.Column="1"
                                       Style="{StaticResource SettingsCheck}"
-                                      Content="Software rendering (skips the GPU driver: much less memory, restart required)" />
+                                      Content="Software rendering (recommended: ~190 MB less memory; turn off to use the GPU. Restart required)" />
                         </Grid>
 
                         <!-- Session daemon (opt-in) -->

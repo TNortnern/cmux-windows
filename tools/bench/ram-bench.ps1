@@ -22,8 +22,8 @@ param(
     [string] $Cli = (Join-Path (Split-Path $AppExe) "cmux.exe"),
     [string] $OutDir = (Join-Path $PSScriptRoot "results"),
     [switch] $KeepData,
-    # Start the app with SoftwareRendering=true (skips the GPU driver).
-    [switch] $SoftwareRendering
+    # Start the app with GPU rendering instead of the default software rendering.
+    [switch] $GpuRendering
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,9 +75,9 @@ function Get-Sample([string] $Scenario) {
 Get-Process -Name "cmuxw", "cmux-daemon" -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 if (-not $KeepData -and (Test-Path $dataDir)) { Remove-Item -Recurse -Force $dataDir }
-if ($SoftwareRendering) {
+if ($GpuRendering) {
     New-Item -ItemType Directory -Force $dataDir | Out-Null
-    '{ "SoftwareRendering": true }' | Set-Content -Encoding utf8 (Join-Path $dataDir "settings.json")
+    '{ "softwareRendering": false }' | Set-Content -Encoding utf8 (Join-Path $dataDir "settings.json")
 }
 
 $results = @()

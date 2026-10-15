@@ -59,5 +59,8 @@ $norm = { param($x) if ($x) { $x.TrimEnd('\').ToLowerInvariant() } }
 $results | ForEach-Object { $_ | Add-Member Pass ((& $norm $_.Cwd) -eq (& $norm $target)) }
 "Target: $target  (mode: $(if ($Daemon) { 'daemon' } else { 'in-process' }))"
 $results | Format-Table -AutoSize | Out-String -Width 200
-Remove-Item -Recurse -Force $target
+# Shells killed via their Job Object release the folder a moment later.
+for ($i = 0; $i -lt 20 -and (Test-Path $target); $i++) {
+    try { Remove-Item -Recurse -Force $target -ErrorAction Stop } catch { Start-Sleep -Milliseconds 500 }
+}
 if ($results.Pass -contains $false) { exit 1 }
