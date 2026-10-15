@@ -6,6 +6,22 @@ public enum SplitDirection
     Vertical,
 }
 
+/// <summary>Cardinal direction for pane focus and resize.</summary>
+public enum PaneDirection
+{
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// <summary>A leaf pane's rectangle in normalized (0..1) layout coordinates.</summary>
+public readonly record struct PaneRect(string PaneId, double X, double Y, double Width, double Height)
+{
+    public double Right => X + Width;
+    public double Bottom => Y + Height;
+}
+
 public class SplitNode
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -29,7 +45,7 @@ public class SplitNode
     /// Splits this leaf node into a container with two children.
     /// Returns the new second child (the newly created pane).
     /// </summary>
-    public SplitNode Split(SplitDirection direction)
+    public SplitNode Split(SplitDirection direction, string? newPaneId = null)
     {
         if (!IsLeaf)
             throw new InvalidOperationException("Cannot split a non-leaf node.");
@@ -40,7 +56,7 @@ public class SplitNode
             PaneId = PaneId,
         };
 
-        var secondChild = CreateLeaf();
+        var secondChild = CreateLeaf(newPaneId);
 
         IsLeaf = false;
         Direction = direction;
@@ -99,6 +115,9 @@ public class SplitNode
                 yield return leaf;
         }
     }
+
+    /// <summary>Number of leaf panes under this node.</summary>
+    public int LeafCount => IsLeaf ? 1 : (First?.LeafCount ?? 0) + (Second?.LeafCount ?? 0);
 
     /// <summary>
     /// Removes a leaf node with the given pane ID.
@@ -255,36 +274,150 @@ public class SplitNode
         };
     }
 
-    /// <summary>Recursively sets all split ratios to 0.5 (equalizes pane sizes).</summary>
+    /// <summary>
+    /// Sets every split ratio so each pane gets an equal share of the space. Each side is
+    /// weighted by the number of panes it contains (ratio = leaves(first) / leaves(all)).
+    /// </summary>
     public void Equalize()
     {
         if (IsLeaf) return;
-        SplitRatio = 0.5;
+
+        int first = First?.LeafCount ?? 0;
+        int total = first + (Second?.LeafCount ?? 0);
+        SplitRatio = total > 0 ? (double)first / total : 0.5;
+
         First?.Equalize();
         Second?.Equalize();
     }
 
-    /// <summary>Adjusts the split ratio of the nearest ancestor containing the given pane.</summary>
-    public bool ResizePane(string paneId, double delta)
+    /// <summary>
+    /// Grows the given pane toward <paramref name="direction"/> by moving the nearest divider
+    /// with matching orientation. Right/Down move the pane's trailing divider; Left/Up move its
+    /// leading divider. Returns false when no such divider exists.
+    /// </summary>
+    public bool ResizePane(string paneId, PaneDirection direction, double delta)
     {
         if (IsLeaf) return false;
+
+        bool vertical = direction is PaneDirection.Left or PaneDirection.Right;
+        var orientation = vertical ? SplitDirection.Vertical : SplitDirection.Horizontal;
+        bool trailing = direction is PaneDirection.Right or PaneDirection.Down;
+
         bool inFirst = First?.FindNode(paneId) != null;
         bool inSecond = Second?.FindNode(paneId) != null;
         if (!inFirst && !inSecond) return false;
 
-        // Direct child is the target
-        if ((First?.IsLeaf == true && First.PaneId == paneId) ||
-            (Second?.IsLeaf == true && Second.PaneId == paneId))
+        // Prefer the nearest (deepest) matching divider.
+        if (inFirst && First!.ResizePane(paneId, direction, delta)) return true;
+        if (inSecond && Second!.ResizePane(paneId, direction, delta)) return true;
+
+        if (Direction != orientation) return false;
+
+        if (trailing && inFirst)
         {
-            SplitRatio = Math.Clamp(SplitRatio + (inFirst ? delta : -delta), 0.1, 0.9);
+            SplitRatio = Math.Clamp(SplitRatio + delta, 0.1, 0.9);
             return true;
         }
-        // Recurse into the subtree containing the pane
-        if (inFirst && First!.ResizePane(paneId, delta)) return true;
-        if (inSecond && Second!.ResizePane(paneId, delta)) return true;
-        // Pane is nested deeper — resize at this level
-        SplitRatio = Math.Clamp(SplitRatio + (inFirst ? delta : -delta), 0.1, 0.9);
-        return true;
+
+        if (!trailing && inSecond)
+        {
+            SplitRatio = Math.Clamp(SplitRatio - delta, 0.1, 0.9);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Computes each leaf's rectangle inside the unit square from the split ratios.
+    /// </summary>
+    public IReadOnlyList<PaneRect> GetLeafRects()
+    {
+        var result = new List<PaneRect>();
+        CollectLeafRects(0, 0, 1, 1, result);
+        return result;
+    }
+
+    private void CollectLeafRects(double x, double y, double w, double h, List<PaneRect> result)
+    {
+        if (IsLeaf)
+        {
+            if (PaneId != null)
+                result.Add(new PaneRect(PaneId, x, y, w, h));
+            return;
+        }
+
+        double r = Math.Clamp(SplitRatio, 0.0, 1.0);
+        if (Direction == SplitDirection.Vertical)
+        {
+            First?.CollectLeafRects(x, y, w * r, h, result);
+            Second?.CollectLeafRects(x + w * r, y, w * (1 - r), h, result);
+        }
+        else
+        {
+            First?.CollectLeafRects(x, y, w, h * r, result);
+            Second?.CollectLeafRects(x, y + h * r, w, h * (1 - r), result);
+        }
+    }
+
+    /// <summary>
+    /// Finds the pane nearest to <paramref name="paneId"/> in the given direction that overlaps it
+    /// on the perpendicular axis. Returns null when there is none.
+    /// </summary>
+    public string? FindNeighborPaneId(string paneId, PaneDirection direction)
+    {
+        const double eps = 1e-6;
+        var rects = GetLeafRects();
+        var from = rects.FirstOrDefault(r => r.PaneId == paneId);
+        if (from.PaneId == null) return null;
+
+        string? best = null;
+        double bestGap = double.MaxValue;
+        double bestOverlap = -1;
+
+        foreach (var candidate in rects)
+        {
+            if (candidate.PaneId == paneId) continue;
+
+            double gap;
+            double overlap;
+            switch (direction)
+            {
+                case PaneDirection.Right:
+                    if (candidate.X < from.Right - eps) continue;
+                    gap = candidate.X - from.Right;
+                    overlap = Math.Min(from.Bottom, candidate.Bottom) - Math.Max(from.Y, candidate.Y);
+                    break;
+                case PaneDirection.Left:
+                    if (candidate.Right > from.X + eps) continue;
+                    gap = from.X - candidate.Right;
+                    overlap = Math.Min(from.Bottom, candidate.Bottom) - Math.Max(from.Y, candidate.Y);
+                    break;
+                case PaneDirection.Down:
+                    if (candidate.Y < from.Bottom - eps) continue;
+                    gap = candidate.Y - from.Bottom;
+                    overlap = Math.Min(from.Right, candidate.Right) - Math.Max(from.X, candidate.X);
+                    break;
+                case PaneDirection.Up:
+                    if (candidate.Bottom > from.Y + eps) continue;
+                    gap = from.Y - candidate.Bottom;
+                    overlap = Math.Min(from.Right, candidate.Right) - Math.Max(from.X, candidate.X);
+                    break;
+                default:
+                    return null;
+            }
+
+            if (overlap <= eps) continue;
+
+            if (gap < bestGap - eps || (Math.Abs(gap - bestGap) <= eps && overlap > bestOverlap))
+            {
+                best = candidate.PaneId;
+                bestGap = gap;
+                bestOverlap = overlap;
+            }
+        }
+
+        return best;
     }
 
     /// <summary>Swaps two panes by exchanging their PaneId values.</summary>

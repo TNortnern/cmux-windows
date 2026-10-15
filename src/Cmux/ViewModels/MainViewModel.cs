@@ -61,29 +61,53 @@ public partial class MainViewModel : ObservableObject
             App.PipeServer.OnCommand = HandlePipeCommand;
         }
 
-        // Restore session or create default workspace
+        // Parse session.json once: restore the layout and keep the window geometry for the view.
         var session = SessionPersistenceService.Load();
+        InitialWindowState = session?.Window;
+
         if (session != null && session.Workspaces.Count > 0)
         {
             RestoreSession(session);
         }
         else
         {
-            CreateNewWorkspace();
+            CreateWorkspace(null);
         }
+
+        ReconcileDaemonSessionsInBackground();
     }
+
+    /// <summary>Window geometry from the saved session (read once at startup).</summary>
+    public Cmux.Core.Models.WindowState? InitialWindowState { get; }
 
     [RelayCommand]
     public void CreateNewWorkspace()
+    {
+        // A new workspace starts in the focused pane's current directory.
+        CreateWorkspace(SelectedWorkspace?.SelectedSurface?.GetFocusedWorkingDirectory());
+    }
+
+    private void CreateWorkspace(string? workingDirectory)
     {
         var workspace = new Workspace { Name = $"Workspace {Workspaces.Count + 1}" };
         var surface = new Surface { Name = "Terminal 1" };
         workspace.Surfaces.Add(surface);
         workspace.SelectedSurface = surface;
 
-        var vm = new WorkspaceViewModel(workspace, _notificationService);
+        var vm = new WorkspaceViewModel(workspace, _notificationService, workingDirectory);
         Workspaces.Add(vm);
         SelectedWorkspace = vm;
+    }
+
+    // Only the selected workspace runs terminal sessions and periodic detection.
+    partial void OnSelectedWorkspaceChanging(WorkspaceViewModel? value)
+    {
+        SelectedWorkspace?.SetActive(false);
+    }
+
+    partial void OnSelectedWorkspaceChanged(WorkspaceViewModel? value)
+    {
+        value?.SetActive(true);
     }
 
     public void DuplicateWorkspace(WorkspaceViewModel source)
@@ -172,6 +196,7 @@ public partial class MainViewModel : ObservableObject
 
         int index = Workspaces.IndexOf(workspace);
         workspace.CaptureAllSurfaceTranscripts("workspace-close");
+        workspace.CloseDaemonSessions();
         workspace.Dispose();
         Workspaces.Remove(workspace);
 
@@ -274,14 +299,16 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    public void SaveSession(double windowX, double windowY, double windowWidth, double windowHeight, bool isMaximized)
+    /// <param name="captureTranscripts">Transcripts are written only on real shutdown, not on autosave.</param>
+    public void SaveSession(double windowX, double windowY, double windowWidth, double windowHeight, bool isMaximized, bool captureTranscripts = true)
     {
         // Capture terminal transcripts and in-memory terminal context before serializing.
         foreach (var workspace in Workspaces)
         {
             foreach (var surface in workspace.Surfaces)
             {
-                surface.CaptureAllPaneTranscripts("session-close");
+                if (captureTranscripts)
+                    surface.CaptureAllPaneTranscripts("session-close");
                 surface.CapturePaneSnapshotsForPersistence();
             }
         }
@@ -293,6 +320,93 @@ public partial class MainViewModel : ObservableObject
             windowX, windowY, windowWidth, windowHeight,
             isMaximized, SidebarWidth, SidebarVisible, CompactSidebar);
         SessionPersistenceService.Save(state);
+    }
+
+    /// <summary>
+    /// A cheap fingerprint of the workspace/tab/pane layout (no terminal contents). Autosave writes
+    /// only when this changes, so idle sessions cost no disk writes or snapshot work.
+    /// </summary>
+    public string GetLayoutSignature()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append(SelectedWorkspace != null ? Workspaces.IndexOf(SelectedWorkspace) : -1).Append('#');
+
+        foreach (var ws in Workspaces)
+        {
+            sb.Append(ws.Workspace.Id).Append('|').Append(ws.Name).Append('|')
+              .Append(ws.IconGlyph).Append('|').Append(ws.AccentColor).Append('|')
+              .Append(ws.WorkingDirectory).Append('|')
+              .Append(ws.SelectedSurface != null ? ws.Surfaces.IndexOf(ws.SelectedSurface) : -1).Append('{');
+
+            foreach (var surface in ws.Surfaces)
+            {
+                sb.Append(surface.Surface.Id).Append('|').Append(surface.Name).Append('|')
+                  .Append(surface.FocusedPaneId).Append('|').Append(surface.IsZoomed ? 'z' : '-').Append('|');
+                AppendTreeSignature(sb, surface.RootNode);
+                foreach (var (paneId, customName) in surface.Surface.PaneCustomNames)
+                    sb.Append(paneId).Append('=').Append(customName).Append(';');
+                sb.Append('/');
+            }
+
+            sb.Append('}');
+        }
+
+        return sb.ToString();
+    }
+
+    private static void AppendTreeSignature(System.Text.StringBuilder sb, SplitNode node)
+    {
+        if (node.IsLeaf)
+        {
+            sb.Append('L').Append(node.PaneId).Append(';');
+            return;
+        }
+
+        sb.Append('S').Append(node.Direction).Append(node.SplitRatio.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append('(');
+        if (node.First != null) AppendTreeSignature(sb, node.First);
+        if (node.Second != null) AppendTreeSignature(sb, node.Second);
+        sb.Append(')');
+    }
+
+    /// <summary>
+    /// When the daemon is connected at startup, closes daemon sessions that no restored pane refers to
+    /// (left behind by earlier runs). Runs in the background; panes restored later are never touched.
+    /// </summary>
+    private void ReconcileDaemonSessionsInBackground()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (!await App.DaemonConnectTask)
+                    return;
+
+                var known = await Application.Current.Dispatcher.InvokeAsync(() => CollectAllPaneIds()).Task;
+                var client = App.DaemonClient;
+                var sessions = await client.ListSessionsAsync();
+
+                foreach (var info in sessions.Where(s => !known.Contains(s.PaneId)))
+                {
+                    Log.Info("Closing orphaned daemon session");
+                    await client.CloseSessionAsync(info.PaneId);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Debug($"Daemon orphan cleanup skipped: {ex.GetType().Name}");
+            }
+        });
+    }
+
+    private HashSet<string> CollectAllPaneIds()
+    {
+        return Workspaces
+            .SelectMany(w => w.Surfaces)
+            .SelectMany(s => s.RootNode.GetLeaves())
+            .Select(l => l.PaneId)
+            .Where(id => !string.IsNullOrEmpty(id))
+            .Cast<string>()
+            .ToHashSet();
     }
 
     private void RestoreSession(SessionState session)
@@ -417,8 +531,12 @@ public partial class MainViewModel : ObservableObject
                 "WORKSPACE.LIST" => HandleWorkspaceList(),
                 "WORKSPACE.CREATE" => HandleWorkspaceCreate(args),
                 "WORKSPACE.SELECT" => HandleWorkspaceSelect(args),
+                "WORKSPACE.NEXT" => HandleWorkspaceStep(next: true),
+                "WORKSPACE.PREVIOUS" => HandleWorkspaceStep(next: false),
                 "SURFACE.CREATE" => HandleSurfaceCreate(args),
                 "SURFACE.SELECT" => HandleSurfaceSelect(args),
+                "SURFACE.NEXT" => HandleSurfaceStep(next: true),
+                "SURFACE.PREVIOUS" => HandleSurfaceStep(next: false),
                 "SPLIT.RIGHT" => HandleSplit(SplitDirection.Vertical),
                 "SPLIT.DOWN" => HandleSplit(SplitDirection.Horizontal),
                 "PANE.LIST" => HandlePaneList(args),
@@ -500,10 +618,54 @@ public partial class MainViewModel : ObservableObject
         return JsonSerializer.Serialize(new { error = "Workspace not found" });
     }
 
+    private string HandleWorkspaceStep(bool next)
+    {
+        if (Workspaces.Count == 0)
+            return JsonSerializer.Serialize(new { error = "No workspace available." });
+
+        if (next) NextWorkspace();
+        else PreviousWorkspace();
+        return JsonSerializer.Serialize(new { ok = true });
+    }
+
+    private string HandleSurfaceStep(bool next)
+    {
+        var workspace = SelectedWorkspace;
+        if (workspace == null)
+            return JsonSerializer.Serialize(new { error = "No workspace available." });
+
+        if (next) workspace.NextSurface();
+        else workspace.PreviousSurface();
+        return JsonSerializer.Serialize(new { ok = true, surfaceId = workspace.SelectedSurface?.Surface.Id });
+    }
+
     private string HandleSurfaceCreate(Dictionary<string, string> args)
     {
-        SelectedWorkspace?.CreateNewSurface();
-        return JsonSerializer.Serialize(new { ok = true });
+        if (!TryResolveWorkspace(args, out var workspace, out var error))
+            return JsonSerializer.Serialize(new { error });
+
+        // Optional "cwd" must be a local, existing, fully-qualified folder. Without it the new tab
+        // starts in the focused pane's current directory.
+        string? cwd;
+        if (args.TryGetValue("cwd", out var cwdRaw) && !string.IsNullOrWhiteSpace(cwdRaw))
+        {
+            if (!WorkingDirectoryPolicy.IsUsable(cwdRaw))
+                return JsonSerializer.Serialize(new { error = "cwd must be an existing local absolute folder" });
+            cwd = cwdRaw.Trim();
+        }
+        else
+        {
+            cwd = workspace.SelectedSurface?.GetFocusedWorkingDirectory();
+        }
+
+        var created = workspace.AddSurface(cwd);
+        return JsonSerializer.Serialize(new
+        {
+            ok = true,
+            workspaceId = workspace.Workspace.Id,
+            surfaceId = created.Surface.Id,
+            surfaceName = created.Name,
+        });
     }
 
     private string HandleSurfaceSelect(Dictionary<string, string> args)
@@ -620,11 +782,12 @@ public partial class MainViewModel : ObservableObject
         if (!TryResolvePaneId(surface, args, out var paneId, out var paneIndex, out var paneName, out error))
             return JsonSerializer.Serialize(new { error });
 
+        surface.EnsureSessionsStarted();
         var session = surface.GetSession(paneId);
         if (session == null)
             return JsonSerializer.Serialize(new { error = $"Pane session not found: {paneId}" });
 
-        bool submit = args.TryGetValue("submit", out var submitRaw)
+        bool submit =args.TryGetValue("submit", out var submitRaw)
             && bool.TryParse(submitRaw, out var parsedSubmit)
             && parsedSubmit;
 
@@ -678,6 +841,7 @@ public partial class MainViewModel : ObservableObject
         if (!TryResolvePaneId(surface, args, out var paneId, out var paneIndex, out var paneName, out error))
             return JsonSerializer.Serialize(new { error });
 
+        surface.EnsureSessionsStarted();
         var session = surface.GetSession(paneId);
         if (session == null)
             return JsonSerializer.Serialize(new { error = $"Pane session not found: {paneId}" });

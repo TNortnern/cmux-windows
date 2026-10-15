@@ -10,7 +10,7 @@
         ResizeMode="CanResize"
         Background="Transparent"
         Loaded="OnLoaded" Closing="OnClosing"
-        KeyDown="OnKeyDown">
+        PreviewKeyDown="OnPreviewKeyDown" PreviewTextInput="OnPreviewTextInput">
 
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="38" CornerRadius="0" GlassFrameThickness="0"
@@ -160,28 +160,30 @@
                                 <Style TargetType="Separator" BasedOn="{StaticResource AppMenuSeparatorStyle}" />
                             </Menu.Resources>
                             <MenuItem Header="_File" Style="{StaticResource AppMenuTopItemStyle}" ItemContainerStyle="{StaticResource AppMenuSubItemStyle}">
-                                <MenuItem Header="_New Workspace" Command="{Binding CreateNewWorkspaceCommand}" InputGestureText="Ctrl+N" />
-                                <MenuItem Header="New _Surface" Command="{Binding SelectedWorkspace.CreateNewSurfaceCommand}" InputGestureText="Ctrl+T" />
+                                <MenuItem Header="_New Workspace" Command="{Binding CreateNewWorkspaceCommand}" InputGestureText="Ctrl+Shift+N" />
+                                <MenuItem Header="New _Tab" Command="{Binding SelectedWorkspace.CreateNewSurfaceCommand}" InputGestureText="Ctrl+Shift+T" />
+                                <MenuItem Header="_Close Pane" Command="{Binding SelectedWorkspace.SelectedSurface.ClosePaneCommand}" InputGestureText="Ctrl+Shift+W" />
                                 <Separator />
                                 <MenuItem Header="Open Command _Logs" Click="MenuOpenLogs_Click" InputGestureText="Ctrl+Shift+L" />
-                                <MenuItem Header="Open Session _Vault" Click="MenuOpenSessionVault_Click" InputGestureText="Ctrl+Shift+V" />
+                                <MenuItem Header="Open Session _Vault" Click="MenuOpenSessionVault_Click" InputGestureText="Ctrl+Shift+S" />
                                 <Separator />
                                 <MenuItem Header="_Settings" Click="MenuOpenSettings_Click" InputGestureText="Ctrl+," />
                                 <Separator />
                                 <MenuItem Header="E_xit" Click="CloseButton_Click" />
                             </MenuItem>
                             <MenuItem Header="_Window" Style="{StaticResource AppMenuTopItemStyle}" ItemContainerStyle="{StaticResource AppMenuSubItemStyle}">
-                                <MenuItem Header="Split _Right" Click="ToolbarSplitRight_Click" InputGestureText="Ctrl+D" />
-                                <MenuItem Header="Split _Down" Click="ToolbarSplitDown_Click" InputGestureText="Ctrl+Shift+D" />
+                                <MenuItem Header="Split _Right" Click="ToolbarSplitRight_Click" InputGestureText="Alt+Shift+=" />
+                                <MenuItem Header="Split _Down" Click="ToolbarSplitDown_Click" InputGestureText="Alt+Shift+-" />
+                                <MenuItem Header="Split _Longer Side" Click="ToolbarSplitLonger_Click" InputGestureText="Alt+Shift+D" />
                                 <MenuItem Header="_Zoom Pane" Click="ToolbarZoom_Click" InputGestureText="Ctrl+Shift+Z" />
-                                <MenuItem Header="_Equalize Panes" Click="ToolbarEqualize_Click" />
+                                <MenuItem Header="_Equalize Panes" Click="ToolbarEqualize_Click" InputGestureText="Ctrl+Shift+E" />
                                 <Separator />
                                 <MenuItem Header="_Search" Click="Search_Click" InputGestureText="Ctrl+Shift+F" />
                                 <MenuItem Header="Command _Palette" Click="CommandPalette_Click" InputGestureText="Ctrl+Shift+P" />
                                 <MenuItem Header="_Snippets" Click="Snippets_Click" />
                                 <Separator />
                                 <MenuItem Header="Toggle Agent _Chat" Click="MenuToggleAgentChat_Click" InputGestureText="Ctrl+Shift+A" />
-                                <MenuItem Header="Toggle _Sidebar" Command="{Binding ToggleSidebarCommand}" InputGestureText="Ctrl+B" />
+                                <MenuItem Header="Toggle _Sidebar" Command="{Binding ToggleSidebarCommand}" InputGestureText="Ctrl+Shift+B" />
                             </MenuItem>
                             <MenuItem Header="_Help" Style="{StaticResource AppMenuTopItemStyle}" ItemContainerStyle="{StaticResource AppMenuSubItemStyle}">
                                 <MenuItem Header="Keyboard Shortcuts" Click="MenuOpenKeyboardShortcuts_Click" />
@@ -250,11 +252,11 @@
                                 </StackPanel>
 
                                 <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                    <Button Style="{StaticResource IconButton}" ToolTip="New Workspace (Ctrl+N)"
+                                    <Button Style="{StaticResource IconButton}" ToolTip="New Workspace (Ctrl+Shift+N)"
                                             Width="24" Height="24" Command="{Binding CreateNewWorkspaceCommand}">
                                         <TextBlock Text="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="10" />
                                     </Button>
-                                    <Button Style="{StaticResource IconButton}" ToolTip="Session Vault (Ctrl+Shift+V)"
+                                    <Button Style="{StaticResource IconButton}" ToolTip="Session Vault (Ctrl+Shift+S)"
                                             Width="24" Height="24" Click="MenuOpenSessionVault_Click">
                                         <TextBlock Text="&#xE8D1;" FontFamily="Segoe MDL2 Assets" FontSize="10" />
                                     </Button>
@@ -402,11 +404,11 @@
                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1"
                             Padding="6,2">
                         <StackPanel Orientation="Horizontal">
-                            <Button Style="{StaticResource IconButton}" ToolTip="Split Right (Ctrl+D)"
+                            <Button Style="{StaticResource IconButton}" ToolTip="Split Right (Alt+Shift+=)"
                                     Click="ToolbarSplitRight_Click">
                                 <TextBlock Text="&#xE26B;" FontFamily="Segoe MDL2 Assets" FontSize="12" />
                             </Button>
-                            <Button Style="{StaticResource IconButton}" ToolTip="Split Down (Ctrl+Shift+D)"
+                            <Button Style="{StaticResource IconButton}" ToolTip="Split Down (Alt+Shift+-)"
                                     Click="ToolbarSplitDown_Click">
                                 <TextBlock Text="&#xE74B;" FontFamily="Segoe MDL2 Assets" FontSize="12" />
                             </Button>
