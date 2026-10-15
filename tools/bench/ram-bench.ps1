@@ -3,8 +3,8 @@
   Reproducible RAM benchmark for cmux-windows.
 
 .DESCRIPTION
-  Launches a built cmuxw.exe, drives it over the \\.\pipe\cmux control pipe
-  (JSON argument form, supported by every version), and samples memory of the
+  Launches a built cmuxw.exe, drives it with `cmux rpc` over the \\.\pipe\cmux control
+  pipe (JSON argument form, supported by every version), and samples memory of the
   cmux processes (app + daemon, NOT the shells, which are reported separately).
 
   Scenarios:
@@ -18,26 +18,26 @@
 param(
     [Parameter(Mandatory)] [string] $AppExe,
     [string] $Label = "run",
+    # CLI used to drive the app; must support `cmux rpc` (any build's app understands it).
+    [string] $Cli = (Join-Path (Split-Path $AppExe) "cmux.exe"),
     [string] $OutDir = (Join-Path $PSScriptRoot "results"),
     [switch] $KeepData
 )
 
 $ErrorActionPreference = "Stop"
 $AppExe = (Resolve-Path $AppExe).Path
+$Cli = (Resolve-Path $Cli).Path
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $dataDir = Join-Path $env:LOCALAPPDATA "cmux"
 
 function Send-Cmux([string] $Command, [hashtable] $CmdArgs = @{}) {
-    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", "cmux", [System.IO.Pipes.PipeDirection]::InOut)
-    try {
-        $pipe.Connect(5000)
-        $writer = [System.IO.StreamWriter]::new($pipe); $writer.AutoFlush = $true
-        $reader = [System.IO.StreamReader]::new($pipe)
-        $line = $Command
-        if ($CmdArgs.Count -gt 0) { $line += " " + ($CmdArgs | ConvertTo-Json -Compress) }
-        $writer.WriteLine($line)
-        return $reader.ReadLine()
-    } finally { $pipe.Dispose() }
+    # Uses the cmux CLI's `rpc` subcommand (JSON on the wire, understood by old and new builds).
+    $cliArgs = @("rpc", $Command) + @($CmdArgs.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })
+    $job = Start-Job { param($cli, $a) & $cli @a 2>&1 } -ArgumentList $Cli, $cliArgs
+    if (-not (Wait-Job $job -Timeout 15)) { Stop-Job $job; Remove-Job $job -Force; throw "cmux rpc $Command timed out" }
+    $out = (Receive-Job $job) -join "`n"; Remove-Job $job -Force
+    if ($out -match "Could not connect") { throw $out }
+    return $out
 }
 
 function Wait-Pipe {

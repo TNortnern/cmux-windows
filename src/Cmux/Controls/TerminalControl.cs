@@ -48,7 +48,10 @@ public class TerminalControl : FrameworkElement
     private bool _followOutput = true;
     private int _lastScrollbackCount;
     private int _renderQueued;
-    private bool _renderDirty;
+    private volatile bool _renderDirty;
+    // Snapshot of IsLoaded && IsVisible, maintained on the UI thread. RequestRender runs on the
+    // session's read thread, where touching dependency properties throws.
+    private volatile bool _isShown;
     private string _cursorStyle = "bar";
     private bool _cursorBlink = true;
 
@@ -172,12 +175,13 @@ public class TerminalControl : FrameworkElement
         IsKeyboardFocusedChanged += (_, _) => UpdateCursorBlink();
         Unloaded += (_, _) =>
         {
+            _isShown = false;
             _cursorTimer.Stop();
             _cursorVisible = true;
         };
     }
 
-    private bool CanRender => IsLoaded && IsVisible;
+    private bool CanRender => _isShown;
 
     public void AttachSession(TerminalSession session)
     {
@@ -240,6 +244,7 @@ public class TerminalControl : FrameworkElement
 
     private void OnShownStateChanged()
     {
+        _isShown = IsLoaded && IsVisible;
         UpdateCursorBlink();
         if (_renderDirty && CanRender)
             RequestRender(System.Windows.Threading.DispatcherPriority.Render);
@@ -299,6 +304,13 @@ public class TerminalControl : FrameworkElement
 
     private void OnBell()
     {
+        // Raised on the session's read thread; DispatcherTimer must live on the UI thread.
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(OnBell);
+            return;
+        }
+
         _bellFlashUntil = DateTime.UtcNow.AddMilliseconds(150);
         RequestRender(System.Windows.Threading.DispatcherPriority.Render);
 

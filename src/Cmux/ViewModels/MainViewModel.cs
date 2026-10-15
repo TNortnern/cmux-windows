@@ -875,11 +875,14 @@ public partial class MainViewModel : ObservableObject
         });
     }
 
+    internal static readonly string AppVersion =
+        typeof(MainViewModel).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion?.Split('+')[0] ?? "unknown";
+
     private string HandleStatus()
     {
         return JsonSerializer.Serialize(new
         {
-            version = "1.0.6",
+            version = AppVersion,
             workspaces = Workspaces.Count,
             selectedWorkspace = SelectedWorkspace?.Workspace.Id,
             unreadNotifications = TotalUnreadCount,

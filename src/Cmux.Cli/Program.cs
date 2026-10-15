@@ -18,6 +18,7 @@ namespace Cmux.Cli;
 ///   cmux split right
 ///   cmux split down
 ///   cmux status
+///   cmux rpc PANE.LIST surfaceIndex=1     (send any pipe command; key=value args)
 /// </summary>
 public static class Program
 {
@@ -43,6 +44,7 @@ public static class Program
                 "surface" => await HandleSurface(args[1..]),
                 "split" => await HandleSplit(args[1..]),
                 "status" => await HandleStatus(),
+                "rpc" => await HandleRpc(args[1..]),
                 "help" or "--help" or "-h" => PrintHelp(),
                 "version" or "--version" or "-v" => PrintVersion(),
                 _ => Error($"Unknown command: {command}"),
@@ -137,6 +139,24 @@ public static class Program
             "down" or "horizontal" or "h" => await SendAndPrint("SPLIT.DOWN"),
             _ => Error($"Unknown split direction: {direction}"),
         };
+    }
+
+    // Raw access to the control pipe for scripting: cmux rpc COMMAND key=value ...
+    private static async Task<int> HandleRpc(string[] args)
+    {
+        if (args.Length == 0)
+            return Error("Usage: cmux rpc <COMMAND> [key=value ...]");
+
+        var cmdArgs = new Dictionary<string, string>();
+        foreach (var pair in args[1..])
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0)
+                return Error($"Expected key=value, got: {pair}");
+            cmdArgs[pair[..eq]] = pair[(eq + 1)..];
+        }
+
+        return await SendAndPrint(args[0].ToUpperInvariant(), cmdArgs);
     }
 
     private static async Task<int> HandleStatus()

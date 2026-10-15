@@ -2839,7 +2839,7 @@ internal sealed class McpProcessSession : IDisposable
             ["clientInfo"] = new Dictionary<string, object?>
             {
                 ["name"] = "cmux",
-                ["version"] = "1.0.6",
+                ["version"] = Cmux.ViewModels.MainViewModel.AppVersion,
             },
         }, ct);
 
