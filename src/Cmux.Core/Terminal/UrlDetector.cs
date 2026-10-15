@@ -4,7 +4,7 @@ namespace Cmux.Core.Terminal;
 
 public static partial class UrlDetector
 {
-    [GeneratedRegex(@"(https?://|ftp://|file://)[\w\-_.~:/?#\[\]@!$&'()*+,;=%]+", RegexOptions.Compiled)]
+    [GeneratedRegex(@"https?://[\w\-_.~:/?#\[\]@!$&'()*+,;=%]+", RegexOptions.Compiled)]
     private static partial Regex UrlPattern();
 
     public static List<(int startCol, int endCol, string url)> FindUrls(string line)

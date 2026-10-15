@@ -96,6 +96,11 @@ public class TerminalBuffer
         return line;
     }
 
+    /// <summary>
+    /// Returns a scrollback row. Rows are stored trimmed to their last non-blank cell,
+    /// so the array may be shorter than <see cref="Cols"/>; indexes beyond its length
+    /// are blank (<see cref="TerminalCell.Empty"/>). Callers must not modify the array.
+    /// </summary>
     public TerminalCell[]? GetScrollbackLine(int index)
     {
         if (index < 0 || index >= _scrollback.Count) return null;
@@ -211,13 +216,7 @@ public class TerminalBuffer
         {
             // If the scroll region starts at line 0, push to scrollback
             if (ScrollTop == 0)
-            {
-                var scrolledLine = new TerminalCell[Cols];
-                for (int c = 0; c < Cols; c++)
-                    scrolledLine[c] = _cells[0, c];
-
-                _scrollback.Add(scrolledLine);
-            }
+                PushTopRowToScrollback();
 
             // Shift lines up within the scroll region
             for (int r = ScrollTop; r < ScrollBottom; r++)
@@ -230,6 +229,30 @@ public class TerminalBuffer
         }
 
         RaiseContentChanged();
+    }
+
+    /// <summary>
+    /// Stores the top row in scrollback, trimmed to its last non-blank cell.
+    /// When the ring is full, the evicted row's array is reused if its length matches.
+    /// </summary>
+    private void PushTopRowToScrollback()
+    {
+        int len = Cols;
+        while (len > 0 && _cells[0, len - 1].IsBlank)
+            len--;
+
+        TerminalCell[]? evicted = _scrollback.Count > 0 && _scrollback.Count == _scrollback.Capacity
+            ? _scrollback[0]
+            : null;
+
+        TerminalCell[] row = evicted is not null && evicted.Length == len
+            ? evicted
+            : (len == 0 ? Array.Empty<TerminalCell>() : new TerminalCell[len]);
+
+        for (int c = 0; c < len; c++)
+            row[c] = _cells[0, c];
+
+        _scrollback.Add(row);
     }
 
     /// <summary>
@@ -470,8 +493,8 @@ public class TerminalBuffer
             _savedMainScrollbackList = null;
         }
 
-        CursorRow = _savedMainCursorRow;
-        CursorCol = _savedMainCursorCol;
+        CursorRow = Math.Clamp(_savedMainCursorRow, 0, Rows - 1);
+        CursorCol = Math.Clamp(_savedMainCursorCol, 0, Cols - 1);
         CurrentAttribute = _savedMainAttribute;
         SetScrollRegion(0, Rows - 1);
         IsAlternateScreen = false;
@@ -531,26 +554,40 @@ public class TerminalBuffer
         newCols = Math.Max(1, newCols);
         newRows = Math.Max(1, newRows);
 
-        var newCells = new TerminalCell[newRows, newCols];
-        for (int r = 0; r < newRows; r++)
-            for (int c = 0; c < newCols; c++)
-                newCells[r, c] = TerminalCell.Empty;
+        if (newCols != Cols || newRows != Rows)
+        {
+            _cells = ResizeGrid(_cells, newRows, newCols);
 
-        int copyRows = Math.Min(Rows, newRows);
-        int copyCols = Math.Min(Cols, newCols);
-        for (int r = 0; r < copyRows; r++)
-            for (int c = 0; c < copyCols; c++)
-                newCells[r, c] = _cells[r, c];
+            // Keep the saved main screen usable if we are on the alternate screen.
+            if (_savedMainCells != null)
+                _savedMainCells = ResizeGrid(_savedMainCells, newRows, newCols);
 
-        _cells = newCells;
-        Cols = newCols;
-        Rows = newRows;
+            Cols = newCols;
+            Rows = newRows;
+            CursorRow = Math.Min(CursorRow, newRows - 1);
+            CursorCol = Math.Min(CursorCol, newCols - 1);
+        }
+
         ScrollTop = 0;
-        ScrollBottom = newRows - 1;
-        CursorRow = Math.Min(CursorRow, newRows - 1);
-        CursorCol = Math.Min(CursorCol, newCols - 1);
+        ScrollBottom = Rows - 1;
 
         RaiseContentChanged();
+    }
+
+    private static TerminalCell[,] ResizeGrid(TerminalCell[,] old, int rows, int cols)
+    {
+        var grid = new TerminalCell[rows, cols];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                grid[r, c] = TerminalCell.Empty;
+
+        int copyRows = Math.Min(old.GetLength(0), rows);
+        int copyCols = Math.Min(old.GetLength(1), cols);
+        for (int r = 0; r < copyRows; r++)
+            for (int c = 0; c < copyCols; c++)
+                grid[r, c] = old[r, c];
+
+        return grid;
     }
 
     public string ExportPlainText(int maxScrollbackLines = 20000)
@@ -654,20 +691,20 @@ public class TerminalBuffer
         return new string(chars).TrimEnd();
     }
 
+    /// <summary>
+    /// Builds a scrollback row from snapshot text, trimmed like live scrollback rows.
+    /// </summary>
     private static TerminalCell[] TextToLine(string? text, int cols)
     {
-        var line = new TerminalCell[cols];
-        for (int i = 0; i < cols; i++)
-            line[i] = TerminalCell.Empty;
+        int len = string.IsNullOrEmpty(text) ? 0 : Math.Min(cols, text.Length);
+        if (len == 0) return Array.Empty<TerminalCell>();
 
-        if (string.IsNullOrEmpty(text)) return line;
-
-        int len = Math.Min(cols, text.Length);
+        var line = new TerminalCell[len];
         for (int i = 0; i < len; i++)
         {
             line[i] = new TerminalCell
             {
-                Character = text[i],
+                Character = text![i],
                 Attribute = TerminalAttribute.Default,
                 IsDirty = true,
                 Width = 1,

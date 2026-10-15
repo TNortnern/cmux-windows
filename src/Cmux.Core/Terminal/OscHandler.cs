@@ -49,10 +49,8 @@ public class OscHandler
                 HandleWorkingDirectory(payload);
                 break;
 
-            case 9: // Terminal notification (body text)
-                // OSC 9 ; <body> ST
-                // Used by many terminal emulators for simple notifications
-                NotificationReceived?.Invoke("Terminal", null, payload);
+            case 9: // OSC 9;9;<cwd> (ConEmu/Windows Terminal cwd) or OSC 9;<body> notification
+                HandleOsc9(payload);
                 break;
 
             case 99: // Extended notification (key=value pairs)
@@ -82,33 +80,76 @@ public class OscHandler
         }
     }
 
+    private void HandleOsc9(string payload)
+    {
+        // OSC 9;9;<path> — cwd report (path may be quoted)
+        if (payload.StartsWith("9;", StringComparison.Ordinal))
+        {
+            HandleWorkingDirectory(payload[2..].Trim('"'));
+            return;
+        }
+
+        // OSC 9;4;... — ConEmu progress indicator, not a notification
+        if (payload == "4" || payload.StartsWith("4;", StringComparison.Ordinal))
+            return;
+
+        // OSC 9;<body> — simple notification
+        NotificationReceived?.Invoke("Terminal", null, payload);
+    }
+
     private void HandleWorkingDirectory(string payload)
     {
-        // Format: file://hostname/path or just a path
-        if (payload.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+        if (TryGetLocalPath(payload, out var path))
+            WorkingDirectoryChanged?.Invoke(path);
+    }
+
+    /// <summary>
+    /// Accepts a file:// URI (empty, localhost or this machine as host) or a plain path,
+    /// and returns a fully-qualified local path. Rejects UNC and remote hosts.
+    /// </summary>
+    private static bool TryGetLocalPath(string payload, out string path)
+    {
+        path = string.Empty;
+        if (string.IsNullOrEmpty(payload))
+            return false;
+
+        try
         {
-            try
+            string candidate = payload;
+
+            if (candidate.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
             {
-                var uri = new Uri(payload);
-                var path = uri.LocalPath;
-                if (!string.IsNullOrEmpty(path))
-                    WorkingDirectoryChanged?.Invoke(path);
+                string rest = candidate["file://".Length..];
+                int slash = rest.IndexOf('/');
+                if (slash < 0)
+                    return false;
+
+                string host = rest[..slash];
+                if (host.Length > 0 &&
+                    !host.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
+                    !host.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                candidate = Uri.UnescapeDataString(rest[slash..]);
+
+                // "/C:/dir" -> "C:/dir"
+                if (candidate.Length >= 3 && candidate[0] == '/' && char.IsAsciiLetter(candidate[1]) && candidate[2] == ':')
+                    candidate = candidate[1..];
             }
-            catch (UriFormatException)
-            {
-                // Try as plain path
-                var path = payload["file://".Length..];
-                int slashIndex = path.IndexOf('/');
-                if (slashIndex >= 0)
-                {
-                    path = path[slashIndex..];
-                    WorkingDirectoryChanged?.Invoke(path);
-                }
-            }
+
+            candidate = candidate.Replace('/', '\\');
+
+            if (candidate.StartsWith(@"\\", StringComparison.Ordinal))
+                return false;
+            if (!Path.IsPathFullyQualified(candidate))
+                return false;
+
+            path = Path.GetFullPath(candidate);
+            return true;
         }
-        else if (!string.IsNullOrEmpty(payload))
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException or UriFormatException)
         {
-            WorkingDirectoryChanged?.Invoke(payload);
+            return false;
         }
     }
 

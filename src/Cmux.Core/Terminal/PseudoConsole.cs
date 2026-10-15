@@ -35,11 +35,12 @@ public sealed class PseudoConsole : IDisposable
     /// </summary>
     public static PseudoConsole Create(short cols, short rows)
     {
-        // Create pipes for the pseudo console's input
+        // Pipes are not inheritable: CreatePseudoConsole takes the handles directly,
+        // and inheritance would leak pane I/O handles into every spawned child process.
         var inputSa = new SECURITY_ATTRIBUTES
         {
             nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-            bInheritHandle = true,
+            bInheritHandle = false,
         };
 
         if (!CreatePipe(out var inputReadPipe, out var inputWritePipe, ref inputSa, 0))
@@ -49,7 +50,7 @@ public sealed class PseudoConsole : IDisposable
         var outputSa = new SECURITY_ATTRIBUTES
         {
             nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-            bInheritHandle = true,
+            bInheritHandle = false,
         };
 
         if (!CreatePipe(out var outputReadPipe, out var outputWritePipe, ref outputSa, 0))
@@ -98,7 +99,8 @@ public sealed class PseudoConsole : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        ClosePseudoConsole(_handle);
+        if (_handle != IntPtr.Zero)
+            ClosePseudoConsole(_handle);
         _handle = IntPtr.Zero;
 
         ReadPipe.Dispose();
