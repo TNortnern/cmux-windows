@@ -409,6 +409,8 @@ public sealed class DaemonClient : IDisposable
         });
     }
 
+    public Task<string?> GetLiveWorkingDirectoryAsync(string paneId) => Task.FromResult<string?>(null); // STUB: package A implements
+
     public async Task<List<DaemonSessionInfo>> ListSessionsAsync()
     {
         var response = await SendRequestAsync(new DaemonRequest

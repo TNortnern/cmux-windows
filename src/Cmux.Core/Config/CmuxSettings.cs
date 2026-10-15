@@ -27,7 +27,7 @@ public class CmuxSettings
 
     public string DefaultShell { get; set; } = "";
     public string DefaultShellArgs { get; set; } = "";
-    public int ScrollbackLines { get; set; } = 10_000;
+    public int ScrollbackLines { get; set; } = 5_000;
     public bool BellSound { get; set; } = false;
     public bool VisualBell { get; set; } = true;
     public bool BracketedPaste { get; set; } = true;
@@ -40,8 +40,11 @@ public class CmuxSettings
     public bool AutoCopyOnSelect { get; set; } = false;
     public bool CtrlClickOpensUrls { get; set; } = true;
     public int AutoSaveIntervalSeconds { get; set; } = 30;
-    public bool CaptureTranscriptsOnClose { get; set; } = true;
-    public bool CaptureTranscriptsOnClear { get; set; } = true;
+    public bool CaptureTranscriptsOnClose { get; set; } = false;
+    public bool CaptureTranscriptsOnClear { get; set; } = false;
+    // Opt-in: run shells in the cmux-daemon process so they survive closing the app.
+    // Off by default because it roughly doubles per-pane memory.
+    public bool UseSessionDaemon { get; set; } = false;
     // 0 = keep logs forever (no cleanup)
     public int CommandLogRetentionDays { get; set; } = 90;
     // 0 = keep captures forever (no cleanup)

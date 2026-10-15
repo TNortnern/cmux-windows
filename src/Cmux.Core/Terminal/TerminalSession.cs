@@ -46,10 +46,10 @@ public sealed class TerminalSession : IDisposable
     public event Action? BellReceived;
     public event Action<byte[]>? RawOutputReceived;
 
-    public TerminalSession(string paneId, int cols = 120, int rows = 30)
+    public TerminalSession(string paneId, int cols = 120, int rows = 30, int scrollbackLines = 5_000)
     {
         PaneId = paneId;
-        Buffer = new TerminalBuffer(cols, rows);
+        Buffer = new TerminalBuffer(cols, rows, scrollbackLines);
         _parser = new VtParser();
         _oscHandler = new OscHandler();
         WireParser();
@@ -183,6 +183,12 @@ public sealed class TerminalSession : IDisposable
         if (!string.IsNullOrWhiteSpace(WorkingDirectory))
             WorkingDirectoryChanged?.Invoke(WorkingDirectory);
     }
+
+    /// <summary>
+    /// Best-known current directory of the shell (shell-integration OSC value,
+    /// then the process's real cwd, then the start directory).
+    /// </summary>
+    public string? GetLiveWorkingDirectory() => WorkingDirectory; // STUB: package B implements
 
     private void ReadLoop()
     {

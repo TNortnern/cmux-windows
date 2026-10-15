@@ -8,6 +8,7 @@ public static class DaemonMessageTypes
     public const string SessionClose = "SESSION_CLOSE";
     public const string SessionList = "SESSION_LIST";
     public const string SessionSnapshot = "SESSION_SNAPSHOT";
+    public const string SessionCwd = "SESSION_CWD";
     public const string Ping = "PING";
 
     public const string EventOutput = "OUTPUT";
@@ -19,6 +20,8 @@ public static class DaemonMessageTypes
 
 public class DaemonRequest
 {
+    /// <summary>Correlates a response with its request.</summary>
+    public string? Id { get; set; }
     public string Type { get; set; } = "";
     public string? PaneId { get; set; }
     public int? Cols { get; set; }
@@ -30,6 +33,7 @@ public class DaemonRequest
 
 public class DaemonResponse
 {
+    public string? Id { get; set; }
     public bool Success { get; set; }
     public string? Error { get; set; }
     public string? Data { get; set; }
@@ -43,6 +47,7 @@ public class DaemonSessionInfo
     public string WorkingDirectory { get; set; } = "";
     public string? Title { get; set; }
     public bool IsRunning { get; set; }
+    public int? Pid { get; set; }
     /// <summary>True when the session already existed on the daemon (reconnect/attach).</summary>
     public bool IsExisting { get; set; }
 }

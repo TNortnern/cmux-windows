@@ -15,8 +15,12 @@ public partial class App : Application
     public static NamedPipeServer? PipeServer { get; private set; }
     public static SnippetService SnippetService { get; } = new();
     public static CommandLogService CommandLogService { get; } = new();
-    public static AgentConversationStoreService AgentConversationStore { get; } = new();
-    public static AgentRuntimeService AgentRuntime { get; } = new();
+    // Agent services are created on first use so a disabled agent costs nothing.
+    private static readonly Lazy<AgentConversationStoreService> _agentConversationStore = new(() => new AgentConversationStoreService());
+    private static readonly Lazy<AgentRuntimeService> _agentRuntime = new(() => new AgentRuntimeService());
+    public static AgentConversationStoreService AgentConversationStore => _agentConversationStore.Value;
+    public static AgentRuntimeService AgentRuntime => _agentRuntime.Value;
+    public static bool IsAgentRuntimeCreated => _agentRuntime.IsValueCreated;
     public static DaemonClient DaemonClient { get; } = new();
     public static Task<bool> DaemonConnectTask { get; private set; } = Task.FromResult(false);
 
@@ -82,7 +86,7 @@ public partial class App : Application
     {
         _pipeServer?.Dispose();
         DaemonClient.Dispose();
-        AgentRuntime.Dispose();
+        if (IsAgentRuntimeCreated) AgentRuntime.Dispose();
         base.OnExit(e);
     }
 
