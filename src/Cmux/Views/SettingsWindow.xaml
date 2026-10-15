@@ -620,6 +620,18 @@
                                       Content="Restore previous session on startup" />
                         </Grid>
 
+                        <!-- Software rendering -->
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Rendering" Style="{StaticResource SectionLabel}" />
+                            <CheckBox x:Name="SoftwareRenderingCheck" Grid.Column="1"
+                                      Style="{StaticResource SettingsCheck}"
+                                      Content="Software rendering (skips the GPU driver: much less memory, restart required)" />
+                        </Grid>
+
                         <!-- Session daemon (opt-in) -->
                         <Grid Margin="0,0,0,10">
                             <Grid.ColumnDefinitions>
