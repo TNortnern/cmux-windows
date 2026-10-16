@@ -95,6 +95,9 @@ public partial class App : Application
         var window = new Views.MainWindow();
         MainWindow = window;
         window.Show();
+
+        // Windows sign-out/shutdown/restart ends the app without closing its windows: snapshot first.
+        SessionEnding += (_, _) => window.SaveSessionNow(captureTranscripts: false);
     }
 
     private static bool ConnectDaemon()

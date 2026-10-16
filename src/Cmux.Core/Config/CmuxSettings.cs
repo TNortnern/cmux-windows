@@ -36,7 +36,6 @@ public class CmuxSettings
     // ── Behavior ────────────────────────────────────────────────
 
     public bool RestoreSessionOnStartup { get; set; } = true;
-    public bool ConfirmOnClose { get; set; } = true;
     public bool AutoCopyOnSelect { get; set; } = false;
     public bool CtrlClickOpensUrls { get; set; } = true;
     public int AutoSaveIntervalSeconds { get; set; } = 30;

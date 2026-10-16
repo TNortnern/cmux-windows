@@ -20,7 +20,7 @@ Start-Sleep 1
 $dataDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "cmux"
 if (Test-Path $dataDir) { Remove-Item -Recurse -Force $dataDir }
 New-Item -ItemType Directory -Force $dataDir | Out-Null
-'{ "useSessionDaemon": true, "confirmOnClose": false }' | Set-Content -Encoding utf8 (Join-Path $dataDir "settings.json")
+'{ "useSessionDaemon": true }' | Set-Content -Encoding utf8 (Join-Path $dataDir "settings.json")
 
 $marker = "cmux-persist-$(Get-Random)"
 $results = @()

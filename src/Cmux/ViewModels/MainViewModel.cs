@@ -65,7 +65,9 @@ public partial class MainViewModel : ObservableObject
         var session = SessionPersistenceService.Load();
         InitialWindowState = session?.Window;
 
-        if (session != null && session.Workspaces.Count > 0)
+        // Workspaces, tabs, splits and folders come back unless the user opted out. Shells always
+        // start fresh (they were ended when cmux closed), except with the opt-in session daemon.
+        if (session != null && session.Workspaces.Count > 0 && Cmux.Core.Config.SettingsService.Current.RestoreSessionOnStartup)
         {
             RestoreSession(session);
         }
@@ -343,6 +345,10 @@ public partial class MainViewModel : ObservableObject
                 sb.Append(surface.Surface.Id).Append('|').Append(surface.Name).Append('|')
                   .Append(surface.FocusedPaneId).Append('|').Append(surface.IsZoomed ? 'z' : '-').Append('|');
                 AppendTreeSignature(sb, surface.RootNode);
+                // Folder changes in any pane (not just the focused one) must trigger an autosave.
+                foreach (var leaf in surface.RootNode.GetLeaves())
+                    if (leaf.PaneId != null)
+                        sb.Append(surface.GetSession(leaf.PaneId)?.WorkingDirectory).Append(';');
                 foreach (var (paneId, customName) in surface.Surface.PaneCustomNames)
                     sb.Append(paneId).Append('=').Append(customName).Append(';');
                 sb.Append('/');

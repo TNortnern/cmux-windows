@@ -257,7 +257,7 @@ public partial class MainWindow : Window
         SaveSessionNow(captureTranscripts: true);
     }
 
-    private void SaveSessionNow(bool captureTranscripts)
+    internal void SaveSessionNow(bool captureTranscripts)
     {
         // Minimized windows report Left/Top as -32000; save the normal-state bounds instead.
         var bounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;

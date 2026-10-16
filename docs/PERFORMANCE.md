@@ -81,6 +81,9 @@ pwsh tools/bench/keys-check.ps1 -AppExe <publish>\cmuxw.exe
 # Session daemon: a shell survives closing and reopening cmux
 pwsh tools/bench/daemon-check.ps1 -AppExe <publish>\cmuxw.exe
 
+# Workspaces, tabs, splits and folders survive close, unvisited tabs and crashes; opt-out works
+pwsh tools/bench/restore-check.ps1 -AppExe <publish>\cmuxw.exe
+
 # Window always opens on a visible monitor; a second launch focuses the running window
 pwsh tools/bench/window-check.ps1 -AppExe <publish>\cmuxw.exe
 ```

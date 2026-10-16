@@ -49,7 +49,12 @@ Keep the three files in the same folder. Add that folder to `PATH` if you want `
 - **Notifications** from coding agents (OSC 9, 99, 777) with unread tracking and Windows toast alerts.
 - **Command palette**, search, snippets, and command history.
 - **Themes and fonts** for the terminal, with custom colors.
-- **Session restore**: window layout, workspaces, tabs, and working directories come back on startup.
+- **Session restore**: close cmux and reopen it to find everything where you left it: every
+  workspace, tab, split and each pane's folder, plus recent output. Closing cmux ends the shells;
+  they start fresh in the same folders. The layout is also autosaved, so a crash or a Windows
+  restart loses at most a few seconds. To start fresh every time, turn off **Settings → Behavior →
+  Reopen workspaces, tabs, splits and folders on startup**. To keep the shells themselves running,
+  use the optional [session daemon](#session-daemon-optional).
 
 ---
 

@@ -92,7 +92,6 @@ public partial class SettingsWindow : Window
         RestoreSessionCheck.IsChecked = s.RestoreSessionOnStartup;
         SessionDaemonCheck.IsChecked = s.UseSessionDaemon;
         SoftwareRenderingCheck.IsChecked = s.SoftwareRendering;
-        ConfirmCloseCheck.IsChecked = s.ConfirmOnClose;
         AutoCopyCheck.IsChecked = s.AutoCopyOnSelect;
         CtrlClickUrlCheck.IsChecked = s.CtrlClickOpensUrls;
         AutoSaveBox.Text = s.AutoSaveIntervalSeconds.ToString();
@@ -212,7 +211,6 @@ public partial class SettingsWindow : Window
             || s.SoftwareRendering != (SoftwareRenderingCheck.IsChecked == true);
         s.SoftwareRendering = SoftwareRenderingCheck.IsChecked == true;
         s.UseSessionDaemon = SessionDaemonCheck.IsChecked == true;
-        s.ConfirmOnClose = ConfirmCloseCheck.IsChecked == true;
         s.AutoCopyOnSelect = AutoCopyCheck.IsChecked == true;
         s.CtrlClickOpensUrls = CtrlClickUrlCheck.IsChecked == true;
         if (int.TryParse(AutoSaveBox.Text, out int asv)) s.AutoSaveIntervalSeconds = asv;

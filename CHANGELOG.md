@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.2
+
+### Session restore
+- Reopening cmux brings back every workspace, tab, split and pane folder. This is now verified
+  end to end: across clean closes, tabs you never opened in a session, and crashes. Shells are ended
+  when cmux closes and start fresh in the same folders.
+- A folder change in any pane now triggers an autosave. Before, only the focused pane's folder did,
+  so a crash could lose where background panes were.
+- The layout is snapshotted when Windows signs out, shuts down or restarts.
+- The **Reopen workspaces, tabs, splits and folders on startup** opt-out now works. It existed in
+  Settings but was never read.
+- Removed the "Confirm close" setting, which was never implemented.
+
 ## 1.1.1
 
 ### Fixes
