@@ -80,7 +80,14 @@ pwsh tools/bench/keys-check.ps1 -AppExe <publish>\cmuxw.exe
 
 # Session daemon: a shell survives closing and reopening cmux
 pwsh tools/bench/daemon-check.ps1 -AppExe <publish>\cmuxw.exe
+
+# Window always opens on a visible monitor; a second launch focuses the running window
+pwsh tools/bench/window-check.ps1 -AppExe <publish>\cmuxw.exe
 ```
+
+`keys-check` drives real keystrokes, so it needs cmux to be the foreground window. Windows sometimes
+refuses that to a background script. The script verifies the foreground before typing, but expect an
+occasional first-chord miss on a busy desktop; rerun before treating it as a bug.
 
 Note: the upstream 1.0.6 control pipe never reads requests (the CLI hangs), so the 1.0.6 numbers
 above were measured with only the 1.1.0 pipe transport files (`NamedPipeServer.cs`,

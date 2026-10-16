@@ -29,8 +29,19 @@ public partial class App : Application
     /// <summary>Whether this run uses the session daemon (read once at startup; changing it needs a restart).</summary>
     public static bool IsDaemonEnabled { get; private set; }
 
+    // Held for the app's lifetime; a second launch finds it taken and hands off to this instance.
+    private static Mutex? _singleInstance;
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        _singleInstance = new Mutex(true, $@"Local\cmux-app-{PipeSecurityFactory.CurrentUserSid}", out bool firstInstance);
+        if (!firstInstance)
+        {
+            ActivateRunningInstance();
+            Shutdown();
+            return;
+        }
+
         base.OnStartup(e);
 
         // Must be set before the first window is created.
@@ -80,6 +91,10 @@ public partial class App : Application
                 Services.ToastNotificationHelper.ShowToast(notification, workspaceName);
             }
         };
+
+        var window = new Views.MainWindow();
+        MainWindow = window;
+        window.Show();
     }
 
     private static bool ConnectDaemon()
@@ -102,8 +117,24 @@ public partial class App : Application
         return connected;
     }
 
+    /// <summary>Asks the already-running cmux to show and focus its window.</summary>
+    private static void ActivateRunningInstance()
+    {
+        Views.WindowPlacement.AllowAnyProcessToTakeForeground();
+        try
+        {
+            // Off the UI thread: the client awaits, and blocking here on it would deadlock.
+            Task.Run(() => NamedPipeClient.SendCommand("WINDOW.ACTIVATE", timeoutMs: 3000)).Wait(TimeSpan.FromSeconds(4));
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Could not reach the running cmux instance", ex);
+        }
+    }
+
     protected override void OnExit(ExitEventArgs e)
     {
+        _singleInstance?.Dispose();
         _pipeServer?.Dispose();
         if (_daemonClient.IsValueCreated) _daemonClient.Value.Dispose();
         if (IsAgentRuntimeCreated) AgentRuntime.Dispose();

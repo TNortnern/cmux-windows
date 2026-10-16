@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.1
+
+### Fixes
+- **The window could open off-screen or minimized and never appear.** This hit multi-monitor and
+  mixed-DPI setups, or anyone who closed or autosaved cmux while it was minimized (that saved the
+  Windows `-32000` "minimized" position). Restored positions are now checked against the current
+  monitors. If the title bar wouldn't be visible, the window opens centered on the primary screen.
+  A minimized window saves its normal position instead.
+- **Launching cmux while it's already running now brings the existing window to the front** (and
+  restores it if minimized) instead of starting a second instance that competed for the same
+  session file and control pipe.
+
 ## 1.1.0
 
 ### Highlights

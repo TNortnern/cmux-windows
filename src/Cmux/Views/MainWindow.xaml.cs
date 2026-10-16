@@ -183,17 +183,17 @@ public partial class MainWindow : Window
     {
         // Restore window position from the session state read at startup (parsed once).
         var w = ViewModel.InitialWindowState;
-        if (w != null)
+        if (w != null && WindowPlacement.IsPlausible(w.X, w.Y, w.Width, w.Height))
         {
-            if (w.Width > 0 && w.Height > 0)
-            {
-                Left = w.X;
-                Top = w.Y;
-                Width = w.Width;
-                Height = w.Height;
-                WindowState = w.IsMaximized ? WindowState.Maximized : WindowState.Normal;
-            }
+            Left = w.X;
+            Top = w.Y;
+            Width = w.Width;
+            Height = w.Height;
+            WindowState = w.IsMaximized ? WindowState.Maximized : WindowState.Normal;
         }
+        // Monitors change (unplugged, rearranged, different DPI): never restore off-screen.
+        WindowPlacement.EnsureOnScreen(this);
+        Activate();
 
         RefreshSurfaceUiState();
         UpdateSidebarLayout();
@@ -259,7 +259,11 @@ public partial class MainWindow : Window
 
     private void SaveSessionNow(bool captureTranscripts)
     {
-        ViewModel.SaveSession(Left, Top, Width, Height, WindowState == WindowState.Maximized, captureTranscripts);
+        // Minimized windows report Left/Top as -32000; save the normal-state bounds instead.
+        var bounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
+        if (bounds.IsEmpty || !WindowPlacement.IsPlausible(bounds.Left, bounds.Top, bounds.Width, bounds.Height))
+            bounds = new Rect(0, 0, 0, 0); // zero size = "no saved position", restore uses the default
+        ViewModel.SaveSession(bounds.Left, bounds.Top, bounds.Width, bounds.Height, WindowState == WindowState.Maximized, captureTranscripts);
     }
 
     // --- Periodic autosave (interval from settings; skipped while the layout is unchanged) ---

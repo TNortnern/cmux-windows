@@ -20,6 +20,7 @@ public static class Kb {
   [StructLayout(LayoutKind.Sequential, Size = 40)] struct IN { public uint type; public KI ki; }
   [DllImport("user32.dll")] static extern uint SendInput(uint n, IN[] i, int size);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   static void K(ushort vk, bool up) { var i = new IN[1]; i[0].type = 1; i[0].ki.vk = vk; i[0].ki.flags = up ? 2u : 0u; SendInput(1, i, Marshal.SizeOf<IN>()); }
   public static void Chord(params ushort[] keys) { foreach (var k in keys) K(k, false); for (int j = keys.Length - 1; j >= 0; j--) K(keys[j], true); }
 }
@@ -29,7 +30,16 @@ $T = 0x54; $W = 0x57; $K1 = 0x31
 
 function Rpc([string[]] $a) { (& $Cli rpc @a) -join "`n" }
 function PaneCount([int] $surface) { @((Rpc "PANE.LIST", "surfaceIndex=$surface" | ConvertFrom-Json).panes).Count }
-function Press([scriptblock] $chord) { [Kb]::SetForegroundWindow($script:hwnd) | Out-Null; Start-Sleep -Milliseconds 300; & $chord; Start-Sleep -Milliseconds 1500 }
+function Focus-App {
+    # Windows' focus-stealing protection can refuse SetForegroundWindow from a background process;
+    # a lone Alt tap unlocks it. Never send keys unless cmux really is the foreground window.
+    for ($i = 0; $i -lt 10; $i++) {
+        if ([Kb]::GetForegroundWindow() -eq $script:hwnd) { return }
+        [Kb]::Chord($ALT); [Kb]::SetForegroundWindow($script:hwnd) | Out-Null; Start-Sleep -Milliseconds 300
+    }
+    throw "could not bring cmux to the foreground; keystroke results would be meaningless"
+}
+function Press([scriptblock] $chord) { Focus-App; Start-Sleep -Milliseconds 200; & $chord; Start-Sleep -Milliseconds 1500 }
 
 Get-Process cmuxw -ErrorAction SilentlyContinue | Stop-Process -Force
 $dataDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "cmux"

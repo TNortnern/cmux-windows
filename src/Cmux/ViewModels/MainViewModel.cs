@@ -545,6 +545,7 @@ public partial class MainViewModel : ObservableObject
                 "PANE.WRITE" => HandlePaneWrite(args),
                 "PANE.READ" => HandlePaneRead(args),
                 "STATUS" => HandleStatus(),
+                "WINDOW.ACTIVATE" => HandleWindowActivate(),
                 _ => JsonSerializer.Serialize(new { error = $"Unknown command: {command}" }),
             };
         });
@@ -878,6 +879,13 @@ public partial class MainViewModel : ObservableObject
 
     internal static readonly string AppVersion =
         typeof(MainViewModel).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion?.Split('+')[0] ?? "unknown";
+
+    private static string HandleWindowActivate()
+    {
+        if (Application.Current.MainWindow is { } window)
+            Cmux.Views.WindowPlacement.BringToFront(window);
+        return JsonSerializer.Serialize(new { ok = true });
+    }
 
     private string HandleStatus()
     {
